@@ -1,0 +1,38 @@
+# Python virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# Generated test samples & assets
+sample*
+test_sample*
+sample_ocr*
+sample_mixed*
+sample_multisheet*
+test_transparent*
+stress_fixtures/
+
+# Temporary & cache files
+*.tmp
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor folders
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace

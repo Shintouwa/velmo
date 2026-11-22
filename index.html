@@ -1,0 +1,2814 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Velmo Studio — Universal 11-Format Any-to-Any Document Converter</title>
+  <meta name="description" content="Velmo — Universal 11-Format Any-to-Any Document Converter with in-browser editing &amp; local OCR.">
+  <meta name="application-name" content="Velmo">
+  <meta property="og:title" content="Velmo Studio — Universal 11-Format Document Converter">
+  <meta property="og:description" content="High-contrast, unrestricted conversion across 11 formats with in-browser editing &amp; local OCR.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* --- CSS Variables & High-Contrast Design System --- */
+    :root[data-theme="dark"] {
+      --bg: #090d16;
+      --card-bg: #111827;
+      --card-subtle: #1a2234;
+      --card-hover: #222d42;
+      --border: #2d3748;
+      --border-focus: #6366f1;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-light: rgba(99, 102, 241, 0.15);
+      --secondary: #0284c7;
+      --secondary-hover: #0369a1;
+      --secondary-light: rgba(2, 132, 199, 0.15);
+      --success: #10b981;
+      --success-hover: #059669;
+      --success-light: rgba(16, 185, 129, 0.15);
+      --error: #f43f5e;
+      --error-light: rgba(244, 63, 94, 0.15);
+      --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.4);
+      --shadow-md: 0 8px 16px -2px rgba(0, 0, 0, 0.5);
+      --shadow-lg: 0 20px 30px -4px rgba(0, 0, 0, 0.6);
+      --mono-font: 'JetBrains Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+    }
+
+    :root[data-theme="light"] {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --card-subtle: #f1f5f9;
+      --card-hover: #e2e8f0;
+      --border: #cbd5e1;
+      --border-focus: #4f46e5;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --text-dim: #64748b;
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+      --primary-light: #eef2ff;
+      --secondary: #0284c7;
+      --secondary-hover: #0369a1;
+      --secondary-light: #e0f2fe;
+      --success: #059669;
+      --success-hover: #047857;
+      --success-light: #ecfdf5;
+      --error: #e11d48;
+      --error-light: #fff1f2;
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 16px 24px -4px rgba(0, 0, 0, 0.08);
+      --mono-font: 'JetBrains Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      transition: background 0.2s ease, color 0.2s ease;
+      line-height: 1.5;
+    }
+
+    /* --- Minimal Top Navigation Bar --- */
+    .top-nav {
+      width: 100%;
+      border-bottom: 1px solid var(--border);
+      background: var(--card-bg);
+      display: flex;
+      justify-content: center;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .top-nav-inner {
+      width: 100%;
+      max-width: 860px;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 800;
+      font-size: 1.05rem;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #ffffff;
+      font-weight: 900;
+      font-size: 0.95rem;
+      box-shadow: 0 2px 6px rgba(99, 102, 241, 0.35);
+    }
+
+    .brand-badge {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: var(--primary-light);
+      color: var(--primary);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .theme-toggle-btn {
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .theme-toggle-btn:hover {
+      background: var(--card-hover);
+      border-color: var(--border-focus);
+    }
+
+    .github-pill {
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 6px 12px;
+      border-radius: 7px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .github-pill:hover {
+      background: var(--card-hover);
+      color: var(--text);
+      border-color: var(--border-focus);
+    }
+
+    /* --- Main Container --- */
+    .main-wrap {
+      width: 100%;
+      max-width: 860px;
+      padding: 24px 20px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .hero-box {
+      text-align: center;
+      padding: 10px 0 4px;
+    }
+
+    .hero-title {
+      font-size: 1.6rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .hero-subtitle {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    /* --- Upload Dropzone --- */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      background: var(--card-bg);
+      padding: 24px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--primary);
+      background: var(--card-subtle);
+      transform: translateY(-1px);
+    }
+
+    .dropzone-icon-box {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: var(--primary-light);
+      color: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 2px;
+    }
+
+    .dropzone-title {
+      font-size: 0.96rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .dropzone-prompt {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .format-pills {
+      display: flex;
+      gap: 5px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+
+    .format-pill {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .file-input-hidden {
+      display: none;
+    }
+
+    /* --- Queued Files Container --- */
+    .files-container {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .files-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .clear-btn {
+      background: none;
+      border: none;
+      color: var(--error);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 3px 8px;
+      border-radius: 5px;
+      transition: background 0.15s;
+    }
+
+    .clear-btn:hover {
+      background: var(--error-light);
+    }
+
+    .files-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 220px;
+      overflow-y: auto;
+      padding-right: 2px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      gap: 12px;
+    }
+
+    .file-item-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      overflow: hidden;
+      flex: 1;
+    }
+
+    .file-order {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--primary);
+      background: var(--primary-light);
+      padding: 2px 6px;
+      border-radius: 4px;
+      min-width: 24px;
+      text-align: center;
+    }
+
+    .file-thumb {
+      width: 36px;
+      height: 36px;
+      border-radius: 5px;
+      object-fit: cover;
+      border: 1px solid var(--border);
+    }
+
+    .file-badge {
+      font-size: 0.72rem;
+      font-weight: 800;
+      padding: 3px 7px;
+      border-radius: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-pdf { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .badge-docx, .badge-doc { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
+    .badge-xlsx, .badge-xls, .badge-csv { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-pptx, .badge-ppt { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-img { background: rgba(168, 85, 247, 0.15); color: #a855f7; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .badge-txt, .badge-md, .badge-html { background: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
+
+    .file-meta {
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .file-name {
+      font-size: 0.84rem;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-size {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+
+    .file-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .reorder-btn, .item-remove-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 5px;
+      padding: 3px 7px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .reorder-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+
+    .item-remove-btn:hover {
+      border-color: var(--error);
+      color: var(--error);
+      background: var(--error-light);
+    }
+
+    .batch-toggle-bar {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+    }
+
+    .toggle-pills {
+      display: flex;
+      gap: 6px;
+    }
+
+    .toggle-pill {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 3px 10px;
+      border-radius: 5px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .toggle-pill.active {
+      background: var(--primary);
+      color: #ffffff;
+      border-color: var(--primary);
+    }
+
+    /* --- Target Format Section --- */
+    .target-section {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .target-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .target-section-title {
+      font-size: 0.8rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .target-detected-pill {
+      font-size: 0.74rem;
+      font-weight: 700;
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: var(--primary-light);
+      color: var(--primary);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      transition: all 0.2s ease;
+    }
+
+    .target-detected-pill.muted {
+      background: var(--card-subtle);
+      color: var(--text-dim);
+      border-color: var(--border);
+      font-weight: 500;
+    }
+
+    .categories-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+    }
+
+    @media (max-width: 720px) {
+      .categories-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .category-col {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .category-col-title {
+      font-size: 0.72rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
+      padding-left: 2px;
+    }
+
+    .format-btn {
+      background: var(--card-subtle);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 1px;
+      text-align: left;
+      transition: all 0.15s ease;
+    }
+
+    .format-btn span:first-child {
+      font-size: 0.84rem;
+      font-weight: 700;
+    }
+
+    .format-btn-sub {
+      font-size: 0.66rem;
+      font-weight: 500;
+      color: var(--text-dim);
+    }
+
+    .format-btn:hover:not(.active):not(.hidden) {
+      border-color: var(--border-focus);
+      background: var(--card-hover);
+      transform: translateY(-1px);
+    }
+
+    .format-btn.active {
+      border-color: var(--primary);
+      background: var(--primary-light);
+      color: var(--primary);
+      box-shadow: 0 0 0 1px var(--primary);
+    }
+
+    .format-btn.active .format-btn-sub {
+      color: var(--primary);
+    }
+
+    .format-btn.hidden {
+      display: none !important;
+    }
+
+    /* --- Smart Conversion Options --- */
+    .smart-options {
+      display: none;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+      animation: fadeIn 0.2s ease;
+    }
+
+    .smart-options-header {
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .smart-options-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .opt-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .opt-label-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+
+    .opt-val {
+      color: var(--primary);
+      font-weight: 800;
+    }
+
+    .dpi-pills {
+      display: flex;
+      gap: 6px;
+    }
+
+    .dpi-pill {
+      flex: 1;
+      background: var(--card-subtle);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.15s;
+    }
+
+    .dpi-pill.active {
+      border-color: var(--primary);
+      background: var(--primary-light);
+      color: var(--primary);
+    }
+
+    .slider-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .quality-slider {
+      flex: 1;
+      accent-color: var(--primary);
+      height: 6px;
+      border-radius: 3px;
+      cursor: pointer;
+    }
+
+    .opt-input {
+      width: 100%;
+      background: var(--card-subtle);
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .opt-input:focus {
+      border-color: var(--border-focus);
+    }
+
+    .opt-hint {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+    }
+
+    /* --- Action Buttons (Prominent Side-by-Side) --- */
+    .action-group {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    @media (max-width: 600px) {
+      .action-group {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .btn-main, .btn-secondary {
+      width: 100%;
+      height: 48px;
+      border-radius: 9px;
+      border: none;
+      font-size: 0.94rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.15s ease;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .btn-main {
+      background: var(--primary);
+      color: #ffffff;
+      box-shadow: 0 4px 10px rgba(99, 102, 241, 0.35);
+    }
+
+    .btn-main:hover:not(:disabled) {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--secondary);
+      color: #ffffff;
+      box-shadow: 0 4px 10px rgba(2, 132, 199, 0.35);
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+      background: var(--secondary-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-main:disabled, .btn-secondary:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+      pointer-events: auto;
+    }
+
+    /* --- Status Banners & Loading Spinner --- */
+    .hidden {
+      display: none !important;
+    }
+
+    .status-box {
+      display: none !important;
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 0.86rem;
+      animation: fadeIn 0.2s ease;
+    }
+
+    .status-box.active {
+      display: flex !important;
+    }
+
+    .status-loading {
+      background: var(--primary-light);
+      border: 1px solid var(--primary);
+      color: var(--text);
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-error {
+      background: var(--error-light);
+      border: 1px solid var(--error);
+      color: var(--error);
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .error-dismiss-btn {
+      background: transparent;
+      border: none;
+      color: var(--error);
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      line-height: 1;
+      opacity: 0.8;
+      transition: opacity 0.15s, background 0.15s;
+    }
+
+    .error-dismiss-btn:hover {
+      opacity: 1;
+      background: rgba(244, 63, 94, 0.2);
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2.5px solid rgba(99, 102, 241, 0.3);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* --- Inline Editable Preview Workspace --- */
+    .edit-workspace {
+      display: none;
+      background: var(--card-bg);
+      border: 1.5px solid var(--secondary);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: var(--shadow-lg);
+      animation: fadeIn 0.3s ease;
+    }
+
+    .edit-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .edit-title-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .edit-title {
+      font-size: 1rem;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .edit-badge {
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 5px;
+      background: var(--secondary-light);
+      color: var(--secondary);
+      text-transform: uppercase;
+      border: 1px solid rgba(2, 132, 199, 0.3);
+    }
+
+    .edit-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .edit-select {
+      background: var(--card-subtle);
+      border: 1.5px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .edit-export-btn {
+      background: var(--success);
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 7px 14px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s;
+    }
+
+    .edit-export-btn:hover {
+      background: var(--success-hover);
+    }
+
+    .edit-close-btn {
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .edit-close-btn:hover {
+      color: var(--error);
+      border-color: var(--error);
+    }
+
+    /* Document Editor View */
+    .doc-editor {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .doc-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.74rem;
+      color: var(--text-muted);
+    }
+
+    .doc-textarea {
+      width: 100%;
+      min-height: 360px;
+      font-family: var(--mono-font);
+      font-size: 0.86rem;
+      line-height: 1.55;
+      padding: 12px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      background: var(--card-subtle);
+      color: var(--text);
+      resize: vertical;
+      outline: none;
+    }
+
+    .doc-textarea:focus {
+      border-color: var(--border-focus);
+    }
+
+    /* Spreadsheet Grid View */
+    .table-editor {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .table-tabs {
+      display: flex;
+      gap: 6px;
+      border-bottom: 2px solid var(--border);
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+
+    .sheet-tab {
+      padding: 5px 12px;
+      border-radius: 6px 6px 0 0;
+      background: var(--card-subtle);
+      color: var(--text-muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      border-bottom: none;
+      white-space: nowrap;
+      transition: all 0.15s;
+    }
+
+    .sheet-tab.active {
+      background: var(--primary);
+      color: #ffffff;
+      border-color: var(--primary);
+    }
+
+    .grid-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .grid-btn-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .grid-btn {
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 9px;
+      border-radius: 5px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .grid-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+
+    .grid-btn-del:hover {
+      border-color: var(--error);
+      color: var(--error);
+    }
+
+    .grid-stats {
+      font-size: 0.74rem;
+      font-weight: 700;
+      color: var(--text-dim);
+    }
+
+    .grid-scroll {
+      max-height: 380px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card-subtle);
+    }
+
+    .grid-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    .grid-table th {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      padding: 6px 8px;
+      font-weight: 700;
+      color: var(--text-muted);
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      text-align: left;
+    }
+
+    .grid-table td {
+      border: 1px solid var(--border);
+      padding: 0;
+      min-width: 100px;
+    }
+
+    .row-idx-cell {
+      width: 36px;
+      min-width: 36px;
+      max-width: 36px;
+      text-align: center;
+      background: var(--card-bg);
+      font-weight: 700;
+      color: var(--text-dim);
+      font-size: 0.7rem;
+      user-select: none;
+      cursor: pointer;
+      padding: 5px 0;
+    }
+
+    .grid-table tr.selected-row td {
+      background: rgba(99, 102, 241, 0.2);
+    }
+
+    .cell-input {
+      width: 100%;
+      box-sizing: border-box;
+      border: none;
+      padding: 6px 8px;
+      font-size: 0.8rem;
+      background: transparent;
+      outline: none;
+      color: var(--text);
+    }
+
+    .cell-input:focus {
+      background: var(--card-bg);
+      box-shadow: inset 0 0 0 2px var(--primary);
+    }
+
+    /* --- Result Card --- */
+    .result-card {
+      display: none;
+      background: var(--card-bg);
+      border: 1.5px solid var(--success);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: var(--shadow-md);
+      animation: fadeIn 0.3s ease;
+    }
+
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    .result-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .result-badge {
+      background: var(--success-light);
+      color: var(--success);
+      padding: 3px 8px;
+      border-radius: 5px;
+      font-weight: 800;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+
+    .result-name {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: var(--text);
+      max-width: 340px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .result-size {
+      font-size: 0.74rem;
+      color: var(--text-dim);
+    }
+
+    .result-btn-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .download-btn {
+      background: var(--success);
+      color: #ffffff;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 16px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);
+      transition: background 0.15s;
+    }
+
+    .download-btn:hover {
+      background: var(--success-hover);
+    }
+
+    .inspect-btn {
+      background: var(--secondary);
+      color: #ffffff;
+      border: none;
+      border-radius: 7px;
+      padding: 8px 14px;
+      font-size: 0.84rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.15s;
+    }
+
+    .inspect-btn:hover {
+      background: var(--secondary-hover);
+    }
+
+    .result-viewport {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--card-subtle);
+    }
+
+    .preview-img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+      max-height: 480px;
+      object-fit: contain;
+    }
+
+    .preview-iframe {
+      width: 100%;
+      height: 460px;
+      border: none;
+      background: #ffffff;
+    }
+
+    .preview-code-wrap {
+      padding: 12px;
+      font-family: var(--mono-font);
+      font-size: 0.8rem;
+      line-height: 1.5;
+      max-height: 380px;
+      overflow: auto;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* Zip Inspector Gallery */
+    .zip-gallery {
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .zip-summary-bar {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .zip-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 10px;
+    }
+
+    .zip-item-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      overflow: hidden;
+    }
+
+    .zip-item-thumb {
+      width: 100%;
+      height: 120px;
+      object-fit: cover;
+      border-radius: 5px;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+    }
+
+    .zip-item-name {
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .zip-item-meta {
+      font-size: 0.68rem;
+      color: var(--text-dim);
+    }
+
+    .zip-text-preview {
+      font-family: var(--mono-font);
+      font-size: 0.7rem;
+      padding: 6px;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      max-height: 80px;
+      overflow: hidden;
+      white-space: pre-wrap;
+    }
+
+    /* --- Session History --- */
+    .history-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .history-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .history-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      gap: 10px;
+    }
+
+    .history-item-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+    }
+
+    .history-name {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 260px;
+    }
+
+    .history-time {
+      font-size: 0.7rem;
+      color: var(--text-dim);
+    }
+
+    .history-btn-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .hist-btn {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 4px 8px;
+      border-radius: 5px;
+      font-size: 0.74rem;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .hist-btn:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+    }
+
+    /* --- Footer --- */
+    .footer {
+      width: 100%;
+      border-top: 1px solid var(--border);
+      padding: 20px;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-top: auto;
+      background: var(--card-bg);
+    }
+
+    .footer a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.15s;
+    }
+
+    .footer a:hover {
+      color: var(--primary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Bar -->
+  <header class="top-nav">
+    <div class="top-nav-inner">
+      <a href="/" class="brand">
+        <div class="brand-icon">V</div>
+        <span>Velmo</span>
+        <span class="brand-badge">Studio</span>
+      </a>
+      <div class="nav-actions">
+        <button type="button" class="theme-toggle-btn" id="themeToggleBtn" title="Toggle Dark/Light Mode">
+          <span id="themeToggleIcon">☀️</span>
+          <span id="themeToggleText">Light</span>
+        </button>
+        <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer" class="github-pill">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+          </svg>
+          Shintouwa ↗
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="main-wrap">
+
+    <div class="hero-box">
+      <h1 class="hero-title">Velmo — Universal Any-to-Any Converter</h1>
+      <p class="hero-subtitle">High-contrast, unrestricted conversion across 11 formats with in-browser editing & local OCR.</p>
+    </div>
+
+    <!-- Upload Zone -->
+    <div class="dropzone" id="dropzone">
+      <div class="dropzone-icon-box">
+        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        </svg>
+      </div>
+      <div class="dropzone-title">Drop your documents or images here</div>
+      <div class="dropzone-prompt">or click to browse from your computer (batch uploads supported)</div>
+      <div class="format-pills">
+        <span class="format-pill">PDF</span>
+        <span class="format-pill">DOCX</span>
+        <span class="format-pill">XLSX</span>
+        <span class="format-pill">PPTX</span>
+        <span class="format-pill">CSV</span>
+        <span class="format-pill">PNG</span>
+        <span class="format-pill">JPG</span>
+        <span class="format-pill">WEBP</span>
+        <span class="format-pill">MD</span>
+        <span class="format-pill">TXT</span>
+        <span class="format-pill">HTML</span>
+      </div>
+      <input type="file" id="fileInput" class="file-input-hidden" multiple accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.csv,.png,.jpg,.jpeg,.webp,.txt,.md,.html">
+    </div>
+
+    <!-- Queued Files Section -->
+    <div class="files-container" id="filesContainer">
+      <div class="files-summary">
+        <span id="filesCountSummary">0 files selected</span>
+        <button type="button" class="clear-btn" id="clearAllBtn">Clear All</button>
+      </div>
+      <div class="batch-toggle-bar" id="batchToggleBar">
+        <span>Multiple images detected:</span>
+        <div class="toggle-pills">
+          <button type="button" class="toggle-pill active" id="combinePill">Combine into 1 file</button>
+          <button type="button" class="toggle-pill" id="separatePill">Keep separate (ZIP)</button>
+        </div>
+      </div>
+      <div class="files-list" id="filesList"></div>
+    </div>
+
+    <!-- Target Format Selector (4 Categories) -->
+    <div class="target-section" id="targetSection">
+      <div class="target-section-header">
+        <span class="target-section-title">Select Target Format</span>
+        <span class="target-detected-pill muted" id="detectedFormatInfo">Drop a file to begin</span>
+      </div>
+
+      <div class="categories-grid">
+        <!-- 1. Documents -->
+        <div class="category-col">
+          <div class="category-col-title">📄 Documents</div>
+          <button type="button" class="format-btn" data-fmt="pdf">
+            <span>PDF (.pdf)</span>
+            <span class="format-btn-sub">Universal Document</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="docx">
+            <span>Word (.docx)</span>
+            <span class="format-btn-sub">Editable Document</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="pptx">
+            <span>PowerPoint (.pptx)</span>
+            <span class="format-btn-sub">Slide Deck</span>
+          </button>
+        </div>
+
+        <!-- 2. Data -->
+        <div class="category-col">
+          <div class="category-col-title">📊 Spreadsheets</div>
+          <button type="button" class="format-btn" data-fmt="xlsx">
+            <span>Excel (.xlsx)</span>
+            <span class="format-btn-sub">Multi-Sheet Table</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="csv">
+            <span>CSV (.csv)</span>
+            <span class="format-btn-sub">Comma Separated</span>
+          </button>
+        </div>
+
+        <!-- 3. Images -->
+        <div class="category-col">
+          <div class="category-col-title">🖼️ Images</div>
+          <button type="button" class="format-btn" data-fmt="png">
+            <span>PNG</span>
+            <span class="format-btn-sub">High Resolution</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="jpg">
+            <span>JPG</span>
+            <span class="format-btn-sub">Compressed</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="webp">
+            <span>WebP</span>
+            <span class="format-btn-sub">Modern Web</span>
+          </button>
+        </div>
+
+        <!-- 4. Text & Web -->
+        <div class="category-col">
+          <div class="category-col-title">🌐 Text & Markup</div>
+          <button type="button" class="format-btn" data-fmt="md">
+            <span>Markdown (.md)</span>
+            <span class="format-btn-sub">Clean Markdown</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="txt">
+            <span>Plain Text (.txt)</span>
+            <span class="format-btn-sub">Raw Text</span>
+          </button>
+          <button type="button" class="format-btn" data-fmt="html">
+            <span>HTML (.html)</span>
+            <span class="format-btn-sub">Web Document</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Smart Conversion Options (Conditional) -->
+    <div class="smart-options" id="smartOptions">
+      <div class="smart-options-header">⚙️ Conversion Settings</div>
+      <div class="smart-options-grid">
+        <!-- DPI Selector -->
+        <div class="opt-row" id="dpiOptionRow">
+          <div class="opt-label-line">
+            <span>Render Resolution (DPI):</span>
+            <span class="opt-val" id="selectedDpiLabel">300 DPI</span>
+          </div>
+          <div class="dpi-pills">
+            <button type="button" class="dpi-pill" data-dpi="150">150 DPI (Web)</button>
+            <button type="button" class="dpi-pill active" data-dpi="300">300 DPI (Print)</button>
+            <button type="button" class="dpi-pill" data-dpi="600">600 DPI (Ultra)</button>
+          </div>
+        </div>
+
+        <!-- Quality Slider -->
+        <div class="opt-row" id="qualityOptionRow">
+          <div class="opt-label-line">
+            <span>Compression Quality:</span>
+            <span class="opt-val" id="qualityLabel">95%</span>
+          </div>
+          <div class="slider-box">
+            <span class="opt-hint">60%</span>
+            <input type="range" id="qualitySlider" class="quality-slider" min="60" max="100" value="95">
+            <span class="opt-hint">100%</span>
+          </div>
+        </div>
+
+        <!-- Page Range Input -->
+        <div class="opt-row" id="pageRangeOptionRow">
+          <div class="opt-label-line">
+            <span>PDF Page Range:</span>
+            <span class="opt-hint">e.g. 1-3, 5 (blank = all pages)</span>
+          </div>
+          <input type="text" id="pageRangeInput" class="opt-input" placeholder="e.g. 1-3, 5">
+        </div>
+      </div>
+    </div>
+
+    <!-- Action Buttons (Prominent Side-by-Side) -->
+    <div class="action-group">
+      <button type="button" class="btn-main" id="convertBtn" disabled title="Upload at least one file to convert">
+        <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+        <span id="btnLabel">Convert Document</span>
+      </button>
+
+      <button type="button" class="btn-secondary" id="editPreviewBtn" disabled title="Upload at least one file to preview & edit">
+        <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+        </svg>
+        <span>Preview & Edit</span>
+      </button>
+    </div>
+
+    <!-- Status Banners -->
+    <div class="status-box status-loading hidden" id="loadingStatus" style="display: none !important;">
+      <div class="spinner"></div>
+      <div id="loadingText">Processing conversion...</div>
+    </div>
+
+    <div class="status-box status-error hidden" id="errorStatus" style="display: none !important;">
+      <span id="errorMsgText"></span>
+      <button type="button" class="error-dismiss-btn" id="errorDismissBtn" title="Dismiss error">✕</button>
+    </div>
+
+    <!-- Inline Editable Preview Workspace -->
+    <div class="edit-workspace" id="editWorkspace">
+      <div class="edit-header">
+        <div class="edit-title-group">
+          <span class="edit-title">✏️ In-Browser Preview & Editor</span>
+          <span class="edit-badge" id="editModeBadge">Markdown</span>
+        </div>
+        <div class="edit-header-actions">
+          <label for="editTargetSelect" style="font-size: 0.74rem; font-weight: 700; color: var(--text-dim);">Export As:</label>
+          <select id="editTargetSelect" class="edit-select">
+            <option value="docx">Word (.docx)</option>
+            <option value="pdf">PDF (.pdf)</option>
+            <option value="xlsx">Excel (.xlsx)</option>
+            <option value="pptx">PowerPoint (.pptx)</option>
+            <option value="csv">CSV (.csv)</option>
+            <option value="png">PNG Image</option>
+            <option value="jpg">JPG Image</option>
+            <option value="webp">WebP Image</option>
+            <option value="md">Markdown (.md)</option>
+            <option value="txt">Plain Text (.txt)</option>
+            <option value="html">HTML (.html)</option>
+          </select>
+          <button type="button" class="edit-export-btn" id="exportEditedBtn">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Export File
+          </button>
+          <button type="button" class="edit-close-btn" id="closeEditBtn" title="Close Editor">✕</button>
+        </div>
+      </div>
+
+      <!-- Document Mode View -->
+      <div class="doc-editor" id="docEditorContainer">
+        <div class="doc-toolbar">
+          <span>💡 Edit Markdown copy directly. Headings (#, ##), tables, and lists will export cleanly.</span>
+          <span class="doc-stats" id="docEditStats">0 words • 0 characters</span>
+        </div>
+        <textarea id="docEditTextarea" class="doc-textarea" placeholder="Extracted document text will appear here..." spellcheck="false"></textarea>
+      </div>
+
+      <!-- Spreadsheet Grid View -->
+      <div class="table-editor" id="tableEditorContainer" style="display: none;">
+        <div class="table-tabs" id="tableSheetTabs"></div>
+        <div class="grid-toolbar">
+          <div class="grid-btn-group">
+            <button type="button" class="grid-btn" id="addRowBtn">➕ Add Row</button>
+            <button type="button" class="grid-btn" id="addColBtn">➕ Add Column</button>
+            <button type="button" class="grid-btn grid-btn-del" id="delRowBtn">➖ Delete Selected Row</button>
+          </div>
+          <span class="grid-stats" id="tableStats">0 rows × 0 cols</span>
+        </div>
+        <div class="grid-scroll">
+          <table class="grid-table" id="gridTable"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Instant Result Preview Card -->
+    <div class="result-card" id="resultCard">
+      <div class="result-header">
+        <div class="result-info">
+          <span class="result-badge" id="resultBadge">PDF</span>
+          <div>
+            <div class="result-name" id="resultName">converted.pdf</div>
+            <div class="result-size" id="resultSize">0 KB</div>
+          </div>
+        </div>
+        <div class="result-btn-group">
+          <button type="button" class="inspect-btn" id="inspectResultBtn" style="display: none;">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            </svg>
+            Inspect / Edit
+          </button>
+          <a class="download-btn" id="downloadBtn" download="converted">
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Download
+          </a>
+        </div>
+      </div>
+      <div class="result-viewport" id="previewViewport"></div>
+    </div>
+
+    <!-- Session History -->
+    <div class="history-card" id="historySection">
+      <div class="history-header">
+        <span>🕒 Recent Conversions (<span id="historyCount">0</span>)</span>
+        <button type="button" class="clear-btn" id="clearHistoryBtn">Clear History</button>
+      </div>
+      <div class="history-list" id="historyList"></div>
+    </div>
+
+  </main>
+
+  <!-- Clean Footer (No Library Spam, Full Creator Credit) -->
+  <footer class="footer">
+    Built by Shintouwa • <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer">GitHub ↗</a> &nbsp;•&nbsp; No login required • Unlimited conversions
+  </footer>
+
+  <script>
+    // --- State Management ---
+    let selectedFiles = []; // File objects
+    let detectedFormat = null;
+    let selectedTarget = null;
+    let selectedDpi = 300;
+    let selectedQuality = 95;
+    let imageCombineMode = 'combine'; // 'combine' | 'separate'
+    let lastDownloadUrl = null;
+    let currentResultBlob = null;
+    let currentResultName = '';
+    let currentResultFmt = '';
+    let sessionHistory = []; // { id, blob, filename, targetFmt, sizeBytes, url, time, isZip }
+
+    // In-Browser Editor State
+    let currentEditMode = null; // 'document' | 'table'
+    let editFilename = 'edited_document';
+    let editSheets = []; // [{ name: "...", rows: [[...]] }]
+    let currentSheetIndex = 0;
+    let selectedGridRow = null;
+
+    // DOM Elements
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('fileInput');
+    const filesContainer = document.getElementById('filesContainer');
+    const filesCountSummary = document.getElementById('filesCountSummary');
+    const clearAllBtn = document.getElementById('clearAllBtn');
+    const filesList = document.getElementById('filesList');
+    const batchToggleBar = document.getElementById('batchToggleBar');
+    const combinePill = document.getElementById('combinePill');
+    const separatePill = document.getElementById('separatePill');
+    const targetSection = document.getElementById('targetSection');
+    const detectedFormatInfo = document.getElementById('detectedFormatInfo');
+    const smartOptions = document.getElementById('smartOptions');
+    const dpiOptionRow = document.getElementById('dpiOptionRow');
+    const selectedDpiLabel = document.getElementById('selectedDpiLabel');
+    const qualityOptionRow = document.getElementById('qualityOptionRow');
+    const qualityLabel = document.getElementById('qualityLabel');
+    const qualitySlider = document.getElementById('qualitySlider');
+    const pageRangeOptionRow = document.getElementById('pageRangeOptionRow');
+    const pageRangeInput = document.getElementById('pageRangeInput');
+    const convertBtn = document.getElementById('convertBtn');
+    const btnLabel = document.getElementById('btnLabel');
+    const editPreviewBtn = document.getElementById('editPreviewBtn');
+    const loadingStatus = document.getElementById('loadingStatus');
+    const loadingText = document.getElementById('loadingText');
+    const errorStatus = document.getElementById('errorStatus');
+    const errorMsgText = document.getElementById('errorMsgText');
+    const errorDismissBtn = document.getElementById('errorDismissBtn');
+    const resultCard = document.getElementById('resultCard');
+    const resultBadge = document.getElementById('resultBadge');
+    const resultName = document.getElementById('resultName');
+    const resultSize = document.getElementById('resultSize');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const inspectResultBtn = document.getElementById('inspectResultBtn');
+    const previewViewport = document.getElementById('previewViewport');
+    const historySection = document.getElementById('historySection');
+    const historyCount = document.getElementById('historyCount');
+    const historyList = document.getElementById('historyList');
+    const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+    const themeToggleBtn = document.getElementById('themeToggleBtn');
+    const themeToggleIcon = document.getElementById('themeToggleIcon');
+    const themeToggleText = document.getElementById('themeToggleText');
+
+    // Editor DOM
+    const editWorkspace = document.getElementById('editWorkspace');
+    const editModeBadge = document.getElementById('editModeBadge');
+    const editTargetSelect = document.getElementById('editTargetSelect');
+    const exportEditedBtn = document.getElementById('exportEditedBtn');
+    const closeEditBtn = document.getElementById('closeEditBtn');
+    const docEditorContainer = document.getElementById('docEditorContainer');
+    const docEditTextarea = document.getElementById('docEditTextarea');
+    const docEditStats = document.getElementById('docEditStats');
+    const tableEditorContainer = document.getElementById('tableEditorContainer');
+    const tableSheetTabs = document.getElementById('tableSheetTabs');
+    const tableStats = document.getElementById('tableStats');
+    const gridTable = document.getElementById('gridTable');
+    const addRowBtn = document.getElementById('addRowBtn');
+    const addColBtn = document.getElementById('addColBtn');
+    const delRowBtn = document.getElementById('delRowBtn');
+
+    const FORMAT_NAMES = {
+      pdf: 'PDF',
+      docx: 'Word (.docx)',
+      pptx: 'PowerPoint (.pptx)',
+      xlsx: 'Excel (.xlsx)',
+      csv: 'CSV (.csv)',
+      png: 'PNG Image',
+      jpg: 'JPG Image',
+      webp: 'WebP Image',
+      md: 'Markdown (.md)',
+      txt: 'Plain Text (.txt)',
+      html: 'HTML (.html)'
+    };
+
+    // --- Theme Toggle (Dark / Light saved in localStorage) ---
+    function initTheme() {
+      const saved = localStorage.getItem('velmo_theme') || localStorage.getItem('doc_converter_theme') || 'dark';
+      applyTheme(saved);
+    }
+
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      localStorage.setItem('velmo_theme', theme);
+      if (theme === 'dark') {
+        themeToggleIcon.textContent = '☀️';
+        themeToggleText.textContent = 'Light';
+      } else {
+        themeToggleIcon.textContent = '🌙';
+        themeToggleText.textContent = 'Dark';
+      }
+    }
+
+    themeToggleBtn.addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      applyTheme(current === 'dark' ? 'light' : 'dark');
+    });
+
+    initTheme();
+
+    // --- Helpers ---
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    function hideAllStatus() {
+      loadingStatus.classList.add('hidden');
+      loadingStatus.classList.remove('active');
+      loadingStatus.style.setProperty('display', 'none', 'important');
+
+      errorStatus.classList.add('hidden');
+      errorStatus.classList.remove('active');
+      errorStatus.style.setProperty('display', 'none', 'important');
+    }
+
+    function showLoading(text) {
+      hideAllStatus();
+      loadingText.textContent = text;
+      loadingStatus.classList.remove('hidden');
+      loadingStatus.classList.add('active');
+      loadingStatus.style.setProperty('display', 'flex', 'important');
+    }
+
+    function showError(msg) {
+      hideAllStatus();
+      if (!msg) return;
+      errorMsgText.textContent = msg;
+      errorStatus.classList.remove('hidden');
+      errorStatus.classList.add('active');
+      errorStatus.style.setProperty('display', 'flex', 'important');
+      errorStatus.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    errorDismissBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideAllStatus();
+    });
+
+    function detectFileFormat(file) {
+      const ext = file.name.slice(file.name.lastIndexOf('.')).toLowerCase().replace('.', '');
+      if (ext === 'jpeg') return 'jpg';
+      if (ext === 'doc') return 'docx';
+      if (ext === 'xls') return 'xlsx';
+      if (ext === 'ppt') return 'pptx';
+      if (['pdf', 'docx', 'xlsx', 'pptx', 'csv', 'png', 'jpg', 'webp', 'txt', 'md', 'html'].includes(ext)) {
+        return ext;
+      }
+      return null;
+    }
+
+    function getBadgeClass(ext) {
+      ext = (ext || '').toLowerCase();
+      if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return 'badge-img';
+      if (['docx', 'doc', 'pptx', 'xlsx', 'csv', 'pdf'].includes(ext)) return `badge-${ext}`;
+      return 'badge-txt';
+    }
+
+    function areAllImages() {
+      if (selectedFiles.length === 0) return false;
+      return selectedFiles.every(f => ['png', 'jpg', 'webp'].includes(detectFileFormat(f)));
+    }
+
+    function isBatchMode() {
+      if (selectedFiles.length <= 1) return false;
+      if (areAllImages()) {
+        if (['pdf', 'docx', 'xlsx', 'pptx'].includes(selectedTarget)) {
+          return imageCombineMode === 'separate';
+        }
+        return true;
+      }
+      return true;
+    }
+
+    // --- File Handling ---
+    function handleFiles(files) {
+      if (!files || files.length === 0) return;
+      hideAllStatus();
+
+      let added = 0;
+      for (const f of Array.from(files)) {
+        const fmt = detectFileFormat(f);
+        if (fmt) {
+          selectedFiles.push(f);
+          added++;
+        } else {
+          showError(`Skipped "${f.name}": Unsupported format. Please upload PDF, Word, Excel, PPTX, CSV, Images, MD, TXT, or HTML.`);
+        }
+      }
+
+      if (added > 0) {
+        fileInput.value = '';
+        computeDetectedFormat();
+        renderFileList();
+        updateTargetButtons();
+        updateOptionsVisibility();
+        updateActionButtons();
+      }
+    }
+
+    function computeDetectedFormat() {
+      if (selectedFiles.length === 0) {
+        detectedFormat = null;
+        return;
+      }
+      if (selectedFiles.length === 1) {
+        detectedFormat = detectFileFormat(selectedFiles[0]);
+        return;
+      }
+      if (areAllImages()) {
+        detectedFormat = 'images';
+        return;
+      }
+      const first = detectFileFormat(selectedFiles[0]);
+      detectedFormat = selectedFiles.every(f => detectFileFormat(f) === first) ? first : 'mixed';
+    }
+
+    function removeFile(idx) {
+      selectedFiles.splice(idx, 1);
+      computeDetectedFormat();
+      if (selectedFiles.length === 0) {
+        selectedTarget = null;
+        hideAllStatus();
+      }
+      renderFileList();
+      updateTargetButtons();
+      updateOptionsVisibility();
+      updateActionButtons();
+    }
+
+    function moveFile(from, to) {
+      if (to < 0 || to >= selectedFiles.length) return;
+      const tmp = selectedFiles[from];
+      selectedFiles[from] = selectedFiles[to];
+      selectedFiles[to] = tmp;
+      renderFileList();
+    }
+
+    function clearAll() {
+      selectedFiles = [];
+      detectedFormat = null;
+      selectedTarget = null;
+      fileInput.value = '';
+      hideAllStatus();
+      editWorkspace.style.display = 'none';
+      renderFileList();
+      updateTargetButtons();
+      updateOptionsVisibility();
+      updateActionButtons();
+    }
+
+    clearAllBtn.addEventListener('click', clearAll);
+
+    // Multi-image combine pills
+    combinePill.addEventListener('click', () => {
+      combinePill.classList.add('active');
+      separatePill.classList.remove('active');
+      imageCombineMode = 'combine';
+      updateActionButtons();
+      updateDetectedFormatInfo();
+    });
+
+    separatePill.addEventListener('click', () => {
+      separatePill.classList.add('active');
+      combinePill.classList.remove('active');
+      imageCombineMode = 'separate';
+      updateActionButtons();
+      updateDetectedFormatInfo();
+    });
+
+    function renderFileList() {
+      if (selectedFiles.length === 0) {
+        filesContainer.style.display = 'none';
+        batchToggleBar.style.display = 'none';
+        updateActionButtons();
+        return;
+      }
+
+      filesContainer.style.display = 'flex';
+      const totalSize = selectedFiles.reduce((acc, f) => acc + f.size, 0);
+      filesCountSummary.textContent = `${selectedFiles.length} file${selectedFiles.length > 1 ? 's' : ''} selected • ${formatBytes(totalSize)}`;
+
+      filesList.innerHTML = '';
+      const allImgs = areAllImages();
+
+      selectedFiles.forEach((file, idx) => {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+        const ext = file.name.slice(file.name.lastIndexOf('.') + 1).toUpperCase();
+        const badgeClass = getBadgeClass(ext);
+        const isImg = ['png', 'jpg', 'jpeg', 'webp'].includes(ext.toLowerCase());
+
+        let thumbHtml = '';
+        if (isImg && allImgs) {
+          const u = URL.createObjectURL(file);
+          thumbHtml = `<img src="${u}" class="file-thumb" alt="Thumb"/>`;
+        } else {
+          thumbHtml = `<div class="file-badge ${badgeClass}">${ext}</div>`;
+        }
+
+        const isMulti = selectedFiles.length > 1;
+
+        item.innerHTML = `
+          <div class="file-item-left">
+            ${isMulti ? `<span class="file-order">#${idx + 1}</span>` : ''}
+            ${thumbHtml}
+            <div class="file-meta">
+              <span class="file-name" title="${file.name}">${file.name}</span>
+              <span class="file-size">${formatBytes(file.size)}</span>
+            </div>
+          </div>
+          <div class="file-actions">
+            ${(isMulti && allImgs) ? `
+              <button type="button" class="reorder-btn move-up" title="Move Up" ${idx === 0 ? 'disabled' : ''}>↑</button>
+              <button type="button" class="reorder-btn move-down" title="Move Down" ${idx === selectedFiles.length - 1 ? 'disabled' : ''}>↓</button>
+            ` : ''}
+            <button type="button" class="item-remove-btn" title="Remove">✕</button>
+          </div>
+        `;
+
+        if (isMulti && allImgs) {
+          item.querySelector('.move-up').addEventListener('click', (e) => { e.stopPropagation(); moveFile(idx, idx - 1); });
+          item.querySelector('.move-down').addEventListener('click', (e) => { e.stopPropagation(); moveFile(idx, idx + 1); });
+        }
+        item.querySelector('.item-remove-btn').addEventListener('click', (e) => { e.stopPropagation(); removeFile(idx); });
+
+        filesList.appendChild(item);
+      });
+
+      updateBatchToggleBar();
+    }
+
+    function updateBatchToggleBar() {
+      const show = (selectedFiles.length > 1 && areAllImages() && ['pdf', 'docx', 'xlsx', 'pptx'].includes(selectedTarget));
+      batchToggleBar.style.display = show ? 'flex' : 'none';
+    }
+
+    function updateDetectedFormatInfo() {
+      if (!selectedFiles.length) {
+        detectedFormatInfo.textContent = 'Drop a file to begin';
+        detectedFormatInfo.classList.add('muted');
+        return;
+      }
+      detectedFormatInfo.classList.remove('muted');
+      if (isBatchMode()) {
+        detectedFormatInfo.textContent = `⚡ Batch Mode (${selectedFiles.length} Files Queued)`;
+      } else if (selectedFiles.length > 1 && areAllImages()) {
+        detectedFormatInfo.textContent = `Input: ${selectedFiles.length} Images (Merge)`;
+      } else if (detectedFormat === 'mixed') {
+        detectedFormatInfo.textContent = `${selectedFiles.length} Files Queued`;
+      } else {
+        detectedFormatInfo.textContent = `Input: ${detectedFormat.toUpperCase()}`;
+      }
+    }
+
+    function updateTargetButtons() {
+      updateDetectedFormatInfo();
+      const allButtons = document.querySelectorAll('.format-btn');
+      const isMixed = (detectedFormat === 'mixed' || isBatchMode());
+      let firstVisible = null;
+
+      allButtons.forEach(btn => {
+        const fmt = btn.dataset.fmt;
+        if (!isMixed && selectedFiles.length === 1 && fmt === detectedFormat) {
+          btn.classList.add('hidden');
+          btn.classList.remove('active');
+        } else {
+          btn.classList.remove('hidden');
+          if (!firstVisible) firstVisible = fmt;
+        }
+      });
+
+      // Pick smart default target if current target is invalid or not selected
+      if (!selectedTarget || (!isMixed && selectedTarget === detectedFormat && selectedFiles.length === 1)) {
+        if (detectedFormat === 'pdf') selectedTarget = 'docx';
+        else if (['png', 'jpg', 'webp', 'images'].includes(detectedFormat)) selectedTarget = 'pdf';
+        else if (detectedFormat === 'docx') selectedTarget = 'pdf';
+        else if (detectedFormat === 'xlsx') selectedTarget = 'csv';
+        else if (detectedFormat === 'csv') selectedTarget = 'xlsx';
+        else if (detectedFormat === 'pptx') selectedTarget = 'pdf';
+        else selectedTarget = firstVisible || 'pdf';
+      }
+
+      allButtons.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.fmt === selectedTarget);
+      });
+
+      updateBatchToggleBar();
+      updateActionButtons();
+      updateOptionsVisibility();
+    }
+
+    function updateOptionsVisibility() {
+      if (!selectedTarget) {
+        smartOptions.style.display = 'none';
+        return;
+      }
+
+      const isTargetImage = ['png', 'jpg', 'webp'].includes(selectedTarget);
+      const isTargetQuality = ['jpg', 'webp'].includes(selectedTarget);
+      const hasPdf = selectedFiles.some(f => detectFileFormat(f) === 'pdf');
+
+      dpiOptionRow.style.display = isTargetImage ? 'flex' : 'none';
+      qualityOptionRow.style.display = isTargetQuality ? 'flex' : 'none';
+      pageRangeOptionRow.style.display = hasPdf ? 'flex' : 'none';
+
+      if (isTargetImage || isTargetQuality || hasPdf) {
+        smartOptions.style.display = 'block';
+      } else {
+        smartOptions.style.display = 'none';
+      }
+    }
+
+    function updateActionButtons() {
+      const hasFiles = selectedFiles.length > 0;
+      const targetName = FORMAT_NAMES[selectedTarget] || (selectedTarget ? selectedTarget.toUpperCase() : 'Document');
+
+      if (!hasFiles) {
+        convertBtn.disabled = true;
+        editPreviewBtn.disabled = true;
+        convertBtn.title = "Upload at least one file to convert";
+        editPreviewBtn.title = "Upload at least one file to preview & edit";
+        btnLabel.textContent = selectedTarget ? `Convert to ${targetName}` : 'Select Files to Convert';
+        return;
+      }
+
+      convertBtn.disabled = false;
+      editPreviewBtn.disabled = false;
+      convertBtn.removeAttribute('title');
+      editPreviewBtn.removeAttribute('title');
+
+      if (isBatchMode()) {
+        btnLabel.textContent = `Batch Convert ${selectedFiles.length} Files to ${targetName} (ZIP)`;
+      } else if (selectedFiles.length > 1 && areAllImages()) {
+        btnLabel.textContent = `Combine ${selectedFiles.length} Images into 1 ${targetName}`;
+      } else {
+        btnLabel.textContent = `Convert to ${targetName}`;
+      }
+    }
+
+    // Format button clicks
+    document.querySelectorAll('.format-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        selectedTarget = btn.dataset.fmt;
+        document.querySelectorAll('.format-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        updateBatchToggleBar();
+        updateActionButtons();
+        updateOptionsVisibility();
+        updateDetectedFormatInfo();
+      });
+    });
+
+    // DPI pill clicks
+    document.querySelectorAll('.dpi-pill').forEach(pill => {
+      pill.addEventListener('click', () => {
+        document.querySelectorAll('.dpi-pill').forEach(p => p.classList.remove('active'));
+        pill.classList.add('active');
+        selectedDpi = parseInt(pill.dataset.dpi, 10);
+        selectedDpiLabel.textContent = `${selectedDpi} DPI`;
+      });
+    });
+
+    qualitySlider.addEventListener('input', (e) => {
+      selectedQuality = parseInt(e.target.value, 10);
+      qualityLabel.textContent = `${selectedQuality}%`;
+    });
+
+    // Drag and drop events
+    ['dragenter', 'dragover'].forEach(n => {
+      dropzone.addEventListener(n, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); });
+    });
+    ['dragleave', 'drop'].forEach(n => {
+      dropzone.addEventListener(n, (e) => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); });
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
+    });
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) handleFiles(e.target.files);
+    });
+
+    // --- Conversion Execution (No Forced Auto-Download!) ---
+    convertBtn.addEventListener('click', async () => {
+      if (!selectedTarget || selectedFiles.length === 0) return;
+      hideAllStatus();
+      convertBtn.disabled = true;
+      editPreviewBtn.disabled = true;
+
+      const batch = isBatchMode();
+      const targetName = FORMAT_NAMES[selectedTarget] || selectedTarget.toUpperCase();
+      const endpoint = batch ? '/convert/batch' : '/convert';
+
+      const loadingMsg = batch
+        ? `Batch converting ${selectedFiles.length} files to ${targetName}...`
+        : `Converting to ${targetName}...`;
+      showLoading(loadingMsg);
+
+      const formData = new FormData();
+      formData.append('target_format', selectedTarget);
+      formData.append('dpi', selectedDpi);
+      formData.append('image_quality', selectedQuality);
+      if (pageRangeInput.value.trim()) {
+        formData.append('page_range', pageRangeInput.value.trim());
+      }
+      selectedFiles.forEach(f => formData.append('files', f));
+
+      try {
+        const resp = await fetch(endpoint, { method: 'POST', body: formData });
+        if (!resp.ok) {
+          let errDetail = 'Conversion failed.';
+          try {
+            const j = await resp.json();
+            if (j && j.detail) errDetail = j.detail;
+          } catch (_) {
+            errDetail = await resp.text();
+          }
+          throw new Error(errDetail);
+        }
+
+        let outName = batch ? `batch_converted_${selectedTarget}.zip` : `converted.${selectedTarget}`;
+        const disp = resp.headers.get('Content-Disposition');
+        if (disp && disp.includes('filename=')) {
+          const match = disp.match(/filename="?([^"]+)"?/);
+          if (match && match[1]) outName = match[1];
+        }
+
+        const blob = await resp.blob();
+        hideAllStatus();
+        convertBtn.disabled = false;
+        editPreviewBtn.disabled = false;
+
+        // NOTE: STOP FORCED AUTO-DOWNLOAD!
+        // Display result card prominently so user clicks Download when ready.
+        const ext = outName.split('.').pop().toLowerCase();
+        const isZip = batch || ext === 'zip';
+        displayPreviewCard(blob, outName, ext, blob.size, isZip);
+        addToHistory(blob, outName, ext, blob.size, isZip);
+
+      } catch (err) {
+        convertBtn.disabled = false;
+        editPreviewBtn.disabled = false;
+        hideAllStatus();
+        showError(err.message || 'An error occurred during conversion.');
+      }
+    });
+
+    // --- Prominent Preview & Edit First Execution ---
+    editPreviewBtn.addEventListener('click', async () => {
+      if (selectedFiles.length === 0) return;
+      hideAllStatus();
+
+      if (!selectedTarget) {
+        selectedTarget = 'docx';
+        updateTargetButtons();
+      }
+
+      convertBtn.disabled = true;
+      editPreviewBtn.disabled = true;
+
+      const targetName = FORMAT_NAMES[selectedTarget] || selectedTarget.toUpperCase();
+      showLoading(`Extracting content for preview & editing (${targetName})...`);
+
+      const formData = new FormData();
+      formData.append('target_format', selectedTarget);
+      if (pageRangeInput.value.trim()) {
+        formData.append('page_range', pageRangeInput.value.trim());
+      }
+      selectedFiles.forEach(f => formData.append('files', f));
+
+      try {
+        const res = await fetch('/preview-editable', { method: 'POST', body: formData });
+        if (!res.ok) {
+          let errDetail = 'Failed to extract preview.';
+          try {
+            const j = await res.json();
+            if (j && j.detail) errDetail = j.detail;
+          } catch (_) {
+            errDetail = await res.text();
+          }
+          throw new Error(errDetail);
+        }
+
+        const data = await res.json();
+        openEditorWorkspace(data);
+
+        hideAllStatus();
+        convertBtn.disabled = false;
+        editPreviewBtn.disabled = false;
+
+      } catch (err) {
+        hideAllStatus();
+        convertBtn.disabled = false;
+        editPreviewBtn.disabled = false;
+        showError(err.message || 'Error extracting content for preview.');
+      }
+    });
+
+    function openEditorWorkspace(data) {
+      currentEditMode = data.mode;
+      editFilename = data.filename || 'edited_document';
+      editTargetSelect.value = data.target_format || selectedTarget || 'docx';
+
+      if (currentEditMode === 'document') {
+        docEditorContainer.style.display = 'flex';
+        tableEditorContainer.style.display = 'none';
+        editModeBadge.textContent = 'Document Text';
+        docEditTextarea.value = data.content || '';
+        updateDocStats();
+      } else {
+        docEditorContainer.style.display = 'none';
+        tableEditorContainer.style.display = 'flex';
+        editModeBadge.textContent = 'Spreadsheet Grid';
+        editSheets = data.sheets || [{ name: 'Sheet 1', rows: [['']] }];
+        currentSheetIndex = 0;
+        renderSheetTabs();
+        renderGridTable();
+      }
+
+      editWorkspace.style.display = 'block';
+      editWorkspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    // --- Document Editor Word & Char Stats ---
+    function updateDocStats() {
+      const text = docEditTextarea.value || '';
+      const chars = text.length;
+      const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+      docEditStats.textContent = `${words.toLocaleString()} words • ${chars.toLocaleString()} characters`;
+    }
+    docEditTextarea.addEventListener('input', updateDocStats);
+
+    // --- Spreadsheet Grid Functions ---
+    function getExcelColumnLabel(idx) {
+      let label = '';
+      idx += 1;
+      while (idx > 0) {
+        const rem = (idx - 1) % 26;
+        label = String.fromCharCode(65 + rem) + label;
+        idx = Math.floor((idx - 1) / 26);
+      }
+      return label;
+    }
+
+    function renderSheetTabs() {
+      tableSheetTabs.innerHTML = '';
+      editSheets.forEach((sheet, idx) => {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = `sheet-tab ${idx === currentSheetIndex ? 'active' : ''}`;
+        tab.textContent = sheet.name || `Sheet ${idx + 1}`;
+        tab.addEventListener('click', () => {
+          currentSheetIndex = idx;
+          selectedGridRow = null;
+          renderSheetTabs();
+          renderGridTable();
+        });
+        tableSheetTabs.appendChild(tab);
+      });
+    }
+
+    function renderGridTable() {
+      gridTable.innerHTML = '';
+      selectedGridRow = null;
+      if (!editSheets[currentSheetIndex]) return;
+
+      const sheet = editSheets[currentSheetIndex];
+      const rows = sheet.rows || [];
+      const rowCount = rows.length;
+      const colCount = Math.max(1, ...rows.map(r => r.length));
+
+      tableStats.textContent = `${rowCount} rows × ${colCount} cols`;
+
+      // Header row
+      const thead = document.createElement('thead');
+      const headerTr = document.createElement('tr');
+      const cornerTh = document.createElement('th');
+      cornerTh.className = 'row-idx-cell';
+      cornerTh.textContent = '#';
+      headerTr.appendChild(cornerTh);
+
+      for (let c = 0; c < colCount; c++) {
+        const th = document.createElement('th');
+        th.textContent = getExcelColumnLabel(c);
+        headerTr.appendChild(th);
+      }
+      thead.appendChild(headerTr);
+      gridTable.appendChild(thead);
+
+      // Body rows
+      const tbody = document.createElement('tbody');
+      rows.forEach((row, rIdx) => {
+        const tr = document.createElement('tr');
+        tr.dataset.rIdx = rIdx;
+
+        const rowNumTd = document.createElement('td');
+        rowNumTd.className = 'row-idx-cell';
+        rowNumTd.textContent = rIdx + 1;
+        rowNumTd.title = 'Click to select/unselect row for deletion';
+        rowNumTd.addEventListener('click', () => {
+          if (selectedGridRow === rIdx) {
+            selectedGridRow = null;
+            tr.classList.remove('selected-row');
+          } else {
+            selectedGridRow = rIdx;
+            tbody.querySelectorAll('tr').forEach(r => r.classList.remove('selected-row'));
+            tr.classList.add('selected-row');
+          }
+        });
+        tr.appendChild(rowNumTd);
+
+        for (let cIdx = 0; cIdx < colCount; cIdx++) {
+          const td = document.createElement('td');
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'cell-input';
+          input.value = (row[cIdx] !== undefined && row[cIdx] !== null) ? row[cIdx] : '';
+          input.addEventListener('input', (e) => {
+            while (sheet.rows[rIdx].length <= cIdx) {
+              sheet.rows[rIdx].push('');
+            }
+            sheet.rows[rIdx][cIdx] = e.target.value;
+          });
+          td.appendChild(input);
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      });
+      gridTable.appendChild(tbody);
+    }
+
+    addRowBtn.addEventListener('click', () => {
+      if (!editSheets[currentSheetIndex]) return;
+      const sheet = editSheets[currentSheetIndex];
+      const colCount = Math.max(1, ...sheet.rows.map(r => r.length));
+      sheet.rows.push(new Array(colCount).fill(''));
+      renderGridTable();
+    });
+
+    addColBtn.addEventListener('click', () => {
+      if (!editSheets[currentSheetIndex]) return;
+      const sheet = editSheets[currentSheetIndex];
+      sheet.rows.forEach(r => r.push(''));
+      renderGridTable();
+    });
+
+    delRowBtn.addEventListener('click', () => {
+      if (!editSheets[currentSheetIndex]) return;
+      const sheet = editSheets[currentSheetIndex];
+      if (sheet.rows.length <= 1) {
+        sheet.rows = [['']];
+        renderGridTable();
+        return;
+      }
+      const deleteIdx = (selectedGridRow !== null) ? selectedGridRow : (sheet.rows.length - 1);
+      sheet.rows.splice(deleteIdx, 1);
+      selectedGridRow = null;
+      renderGridTable();
+    });
+
+    // --- Export Edited File Execution ---
+    exportEditedBtn.addEventListener('click', async () => {
+      hideAllStatus();
+      exportEditedBtn.disabled = true;
+
+      const targetFmt = editTargetSelect.value;
+      const targetName = FORMAT_NAMES[targetFmt] || targetFmt.toUpperCase();
+      showLoading(`Building and exporting edited ${targetName}...`);
+
+      const payload = {
+        mode: currentEditMode,
+        filename: editFilename,
+        target_format: targetFmt,
+        dpi: selectedDpi,
+        image_quality: selectedQuality,
+      };
+
+      if (currentEditMode === 'document') {
+        payload.content = docEditTextarea.value;
+      } else {
+        payload.sheets = editSheets;
+      }
+
+      try {
+        const res = await fetch('/export-edited', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (!res.ok) {
+          let errDetail = 'Export failed.';
+          try {
+            const j = await res.json();
+            if (j && j.detail) errDetail = j.detail;
+          } catch (_) {
+            errDetail = await res.text();
+          }
+          throw new Error(errDetail);
+        }
+
+        let downloadName = `edited_${editFilename}.${targetFmt}`;
+        const disp = res.headers.get('Content-Disposition');
+        if (disp && disp.includes('filename=')) {
+          const match = disp.match(/filename="?([^"]+)"?/);
+          if (match && match[1]) downloadName = match[1];
+        }
+
+        const blob = await res.blob();
+        hideAllStatus();
+        exportEditedBtn.disabled = false;
+
+        const ext = downloadName.split('.').pop().toLowerCase();
+        displayPreviewCard(blob, downloadName, ext, blob.size, ext === 'zip');
+        addToHistory(blob, downloadName, ext, blob.size, ext === 'zip');
+
+      } catch (err) {
+        hideAllStatus();
+        exportEditedBtn.disabled = false;
+        showError(err.message || 'Error exporting edited file.');
+      }
+    });
+
+    closeEditBtn.addEventListener('click', () => {
+      editWorkspace.style.display = 'none';
+    });
+
+    // --- Result Card Display & Live Inspector ---
+    async function displayPreviewCard(blob, filename, targetFmt, sizeBytes, isZip) {
+      currentResultBlob = blob;
+      currentResultName = filename;
+      currentResultFmt = targetFmt;
+
+      resultCard.style.display = 'block';
+      const badgeText = isZip ? 'ZIP' : targetFmt.toUpperCase();
+      resultBadge.textContent = badgeText;
+      resultBadge.className = `result-badge ${getBadgeClass(badgeText)}`;
+      resultName.textContent = filename;
+      resultSize.textContent = formatBytes(sizeBytes);
+
+      if (lastDownloadUrl) URL.revokeObjectURL(lastDownloadUrl);
+      lastDownloadUrl = URL.createObjectURL(blob);
+      downloadBtn.href = lastDownloadUrl;
+      downloadBtn.download = filename;
+
+      // Show "Inspect / Edit Content" button if format is inspectable document/data
+      const canInspect = ['docx', 'xlsx', 'pptx', 'csv', 'pdf'].includes(targetFmt) && !isZip;
+      inspectResultBtn.style.display = canInspect ? 'inline-flex' : 'none';
+
+      previewViewport.innerHTML = '';
+
+      // If output is a ZIP file, inspect its contents via /inspect-zip!
+      if (isZip || filename.endsWith('.zip')) {
+        await renderZipInspector(blob, filename);
+      } else if (['png', 'jpg', 'webp'].includes(targetFmt)) {
+        const img = document.createElement('img');
+        img.src = lastDownloadUrl;
+        img.className = 'preview-img';
+        img.alt = filename;
+        previewViewport.appendChild(img);
+      } else if (targetFmt === 'pdf') {
+        const iframe = document.createElement('iframe');
+        iframe.src = lastDownloadUrl;
+        iframe.className = 'preview-iframe';
+        previewViewport.appendChild(iframe);
+      } else if (['txt', 'md', 'csv', 'html'].includes(targetFmt)) {
+        try {
+          const rawText = await blob.text();
+          const wrap = document.createElement('div');
+          wrap.className = 'preview-code-wrap';
+          wrap.textContent = rawText.slice(0, 10000);
+          previewViewport.appendChild(wrap);
+        } catch (_) {
+          renderFallbackNotice(targetFmt, filename);
+        }
+      } else {
+        renderFallbackNotice(targetFmt, filename);
+      }
+
+      resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // Inspect Zip files using POST /inspect-zip
+    async function renderZipInspector(blob, zipFilename) {
+      const container = document.createElement('div');
+      container.className = 'zip-gallery';
+      container.innerHTML = `<div class="zip-summary-bar"><span>📦 Inspecting archive: ${zipFilename}...</span></div>`;
+      previewViewport.appendChild(container);
+
+      try {
+        const zipForm = new FormData();
+        zipForm.append('file', blob, zipFilename);
+        const resp = await fetch('/inspect-zip', { method: 'POST', body: zipForm });
+        if (!resp.ok) throw new Error('Could not inspect ZIP');
+        const data = await resp.json();
+
+        container.innerHTML = `
+          <div class="zip-summary-bar">
+            <span>📦 Archive contents (${data.total_files} file${data.total_files > 1 ? 's' : ''})</span>
+            <span>Click any image to enlarge</span>
+          </div>
+          <div class="zip-grid" id="zipGrid"></div>
+        `;
+
+        const grid = container.querySelector('#zipGrid');
+        data.entries.forEach(entry => {
+          const card = document.createElement('div');
+          card.className = 'zip-item-card';
+
+          if (entry.type === 'image' && entry.preview) {
+            card.innerHTML = `
+              <img src="${entry.preview}" class="zip-item-thumb" alt="${entry.name}" loading="lazy"/>
+              <div class="zip-item-name" title="${entry.name}">${entry.name}</div>
+              <div class="zip-item-meta">${formatBytes(entry.size)} • ${entry.ext.toUpperCase()}</div>
+            `;
+            card.querySelector('img').addEventListener('click', () => {
+              const w = window.open('');
+              w.document.write(`<img src="${entry.preview}" style="max-width:100%;height:auto;display:block;margin:20px auto;background:#222;"/>`);
+            });
+          } else if (entry.type === 'text' && entry.preview) {
+            card.innerHTML = `
+              <div class="zip-text-preview">${escapeHtml(entry.preview.slice(0, 300))}</div>
+              <div class="zip-item-name" title="${entry.name}">${entry.name}</div>
+              <div class="zip-item-meta">${formatBytes(entry.size)} • ${entry.ext.toUpperCase()}</div>
+            `;
+          } else {
+            card.innerHTML = `
+              <div style="font-size: 2rem; text-align: center; padding: 20px 0;">📄</div>
+              <div class="zip-item-name" title="${entry.name}">${entry.name}</div>
+              <div class="zip-item-meta">${formatBytes(entry.size)} • ${entry.ext.toUpperCase()}</div>
+            `;
+          }
+          grid.appendChild(card);
+        });
+
+      } catch (e) {
+        container.innerHTML = `
+          <div class="zip-summary-bar">
+            <span>📦 Batch Archive Ready (${zipFilename})</span>
+          </div>
+          <div style="padding: 14px; font-size: 0.85rem; color: var(--text-muted);">
+            All converted files are neatly bundled and ready to download.
+          </div>
+        `;
+      }
+    }
+
+    function renderFallbackNotice(fmt, name) {
+      previewViewport.innerHTML = `
+        <div style="padding: 24px 20px; text-align: center;">
+          <div style="font-size: 2rem; margin-bottom: 8px;">📄</div>
+          <strong style="color: var(--text);">${name}</strong>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">
+            Ready to download or click "Inspect / Edit Content" above to review inside the browser.
+          </p>
+        </div>
+      `;
+    }
+
+    function escapeHtml(str) {
+      return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Inspect / Edit Result Button Handler
+    inspectResultBtn.addEventListener('click', async () => {
+      if (!currentResultBlob) return;
+      hideAllStatus();
+      showLoading(`Loading ${currentResultName} into editor...`);
+
+      const formData = new FormData();
+      formData.append('files', currentResultBlob, currentResultName);
+      formData.append('target_format', currentResultFmt);
+
+      try {
+        const res = await fetch('/preview-editable', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('Could not load editable preview');
+        const data = await res.json();
+        openEditorWorkspace(data);
+        hideAllStatus();
+      } catch (err) {
+        hideAllStatus();
+        showError(err.message || 'Error opening editable preview.');
+      }
+    });
+
+    // --- Session History ---
+    function addToHistory(blob, filename, targetFmt, sizeBytes, isZip) {
+      sessionHistory.unshift({
+        id: Date.now() + Math.random(),
+        blob,
+        filename,
+        targetFmt,
+        sizeBytes,
+        isZip: !!isZip,
+        url: URL.createObjectURL(blob),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      });
+      renderSessionHistory();
+    }
+
+    function renderSessionHistory() {
+      if (sessionHistory.length === 0) {
+        historySection.style.display = 'none';
+        return;
+      }
+
+      historySection.style.display = 'flex';
+      historyCount.textContent = sessionHistory.length;
+      historyList.innerHTML = '';
+
+      sessionHistory.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'history-item';
+        row.innerHTML = `
+          <div class="history-item-left">
+            <span class="file-badge ${getBadgeClass(item.targetFmt)}">${item.targetFmt.toUpperCase()}</span>
+            <div>
+              <div class="history-name" title="${item.filename}">${item.filename}</div>
+              <div class="history-time">${formatBytes(item.sizeBytes)} • ${item.time}</div>
+            </div>
+          </div>
+          <div class="history-btn-group">
+            <button type="button" class="hist-btn preview-hist-btn">👁️ Preview</button>
+            <a class="hist-btn" href="${item.url}" download="${item.filename}">📥 Download</a>
+          </div>
+        `;
+
+        row.querySelector('.preview-hist-btn').addEventListener('click', () => {
+          displayPreviewCard(item.blob, item.filename, item.targetFmt, item.sizeBytes, item.isZip);
+        });
+
+        historyList.appendChild(row);
+      });
+    }
+
+    clearHistoryBtn.addEventListener('click', () => {
+      sessionHistory = [];
+      renderSessionHistory();
+    });
+
+    // Initial state
+    hideAllStatus();
+    updateDetectedFormatInfo();
+    updateTargetButtons();
+    updateActionButtons();
+  </script>
+</body>
+</html>
