@@ -1,5 +1,6 @@
 import base64
 import csv
+import gc
 import html
 import io
 import logging
@@ -12,6 +13,11 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+# Limit native BLAS/OpenMP CPU threads to prevent memory spikes on 512MB RAM
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import pymupdf as fitz  # PyMuPDF
 from PIL import Image
@@ -300,33 +306,36 @@ def process_image_for_pdf(image_bytes: bytes, filename: str) -> bytes:
 
 def extract_ocr_items(image_bytes: bytes) -> List[dict]:
     """Runs RapidOCR and returns normalized parsed box items."""
-    ocr = get_ocr_engine()
-    res, _ = ocr(image_bytes)
-    if not res:
-        return []
+    try:
+        ocr = get_ocr_engine()
+        res, _ = ocr(image_bytes)
+        if not res:
+            return []
 
-    items = []
-    for box, text, score in res:
-        text_clean = text.strip()
-        if not text_clean:
-            continue
-        xs = [pt[0] for pt in box]
-        ys = [pt[1] for pt in box]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        items.append({
-            'x_min': x_min,
-            'x_max': x_max,
-            'y_min': y_min,
-            'y_max': y_max,
-            'x_center': (x_min + x_max) / 2.0,
-            'y_center': (y_min + y_max) / 2.0,
-            'height': max(y_max - y_min, 1.0),
-            'width': max(x_max - x_min, 1.0),
-            'text': text_clean,
-            'score': score
-        })
-    return items
+        items = []
+        for box, text, score in res:
+            text_clean = text.strip()
+            if not text_clean:
+                continue
+            xs = [pt[0] for pt in box]
+            ys = [pt[1] for pt in box]
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
+            items.append({
+                'x_min': x_min,
+                'x_max': x_max,
+                'y_min': y_min,
+                'y_max': y_max,
+                'x_center': (x_min + x_max) / 2.0,
+                'y_center': (y_min + y_max) / 2.0,
+                'height': max(y_max - y_min, 1.0),
+                'width': max(x_max - x_min, 1.0),
+                'text': text_clean,
+                'score': score
+            })
+        return items
+    finally:
+        gc.collect()
 
 
 # --- Image Formats (PNG ↔ JPG ↔ WebP) ---
@@ -384,20 +393,25 @@ def parse_page_range(range_str: Optional[str], total_pages: int) -> List[int]:
 
 def filter_pdf_pages(pdf_bytes: bytes, page_range_str: str) -> bytes:
     """Filters a PDF byte string to retain only the pages specified in page_range_str."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = len(doc)
-    if total_pages == 0:
-        doc.close()
-        raise ValueError("PDF document has no pages.")
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
 
-    selected_indices = parse_page_range(page_range_str, total_pages)
-    if selected_indices != list(range(total_pages)):
-        doc.select(selected_indices)
-        out_bytes = doc.tobytes()
-    else:
-        out_bytes = pdf_bytes
-    doc.close()
-    return out_bytes
+    try:
+        total_pages = len(doc)
+        if total_pages == 0:
+            raise ValueError("PDF document has no pages.")
+
+        selected_indices = parse_page_range(page_range_str, total_pages)
+        if selected_indices != list(range(total_pages)):
+            doc.select(selected_indices)
+            out_bytes = doc.tobytes()
+        else:
+            out_bytes = pdf_bytes
+        return out_bytes
+    finally:
+        doc.close()
 
 
 def convert_image_format(
@@ -442,32 +456,39 @@ def pdf_to_images(
 ) -> Tuple[bytes, str, str, int]:
     """Renders PDF pages to PNG, JPG, or WebP at custom DPI and quality."""
     target_fmt = target_fmt.lower().replace("jpeg", "jpg")
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    page_count = len(doc)
-    if page_count == 0:
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
+
+    try:
+        page_count = len(doc)
+        if page_count == 0:
+            raise ValueError("PDF contains no pages.")
+
+        rendered_images: List[Tuple[str, bytes]] = []
+        for idx, page in enumerate(doc, start=1):
+            pix = page.get_pixmap(dpi=dpi, alpha=(target_fmt != "jpg"))
+            if target_fmt == "png":
+                img_bytes = pix.tobytes("png")
+                fname = f"{base_name}_page_{idx:02d}.png"
+            elif target_fmt == "jpg":
+                img_bytes = pix.tobytes("jpg", jpg_quality=image_quality)
+                fname = f"{base_name}_page_{idx:02d}.jpg"
+            elif target_fmt == "webp":
+                buf = io.BytesIO()
+                with Image.frombytes("RGB", [pix.width, pix.height], pix.samples) as pil_img:
+                    pil_img.save(buf, format="WEBP", quality=image_quality)
+                img_bytes = buf.getvalue()
+                fname = f"{base_name}_page_{idx:02d}.webp"
+            else:
+                del pix
+                raise ValueError(f"Unsupported image format: {target_fmt}")
+            del pix
+            rendered_images.append((fname, img_bytes))
+    finally:
         doc.close()
-        raise ValueError("PDF contains no pages.")
-
-    rendered_images: List[Tuple[str, bytes]] = []
-    for idx, page in enumerate(doc, start=1):
-        pix = page.get_pixmap(dpi=dpi, alpha=(target_fmt != "jpg"))
-        if target_fmt == "png":
-            img_bytes = pix.tobytes("png")
-            fname = f"{base_name}_page_{idx:02d}.png"
-        elif target_fmt == "jpg":
-            img_bytes = pix.tobytes("jpg", jpg_quality=image_quality)
-            fname = f"{base_name}_page_{idx:02d}.jpg"
-        elif target_fmt == "webp":
-            buf = io.BytesIO()
-            pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            pil_img.save(buf, format="WEBP", quality=image_quality)
-            img_bytes = buf.getvalue()
-            fname = f"{base_name}_page_{idx:02d}.webp"
-        else:
-            raise ValueError(f"Unsupported image format: {target_fmt}")
-        rendered_images.append((fname, img_bytes))
-
-    doc.close()
+        gc.collect()
 
     if page_count == 1:
         fname, data = rendered_images[0]
@@ -689,109 +710,118 @@ def pdf_to_docx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
         finally:
             if cv:
                 cv.close()
+            gc.collect()
         with open(temp_docx_path, "rb") as f:
             docx_bytes = f.read()
     return docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", 1
 
 
 def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    wb = openpyxl.Workbook()
-    default_sheet = wb.active
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
 
-    thin_border = Border(
-        left=Side(style='thin', color='CBD5E1'),
-        right=Side(style='thin', color='CBD5E1'),
-        top=Side(style='thin', color='CBD5E1'),
-        bottom=Side(style='thin', color='CBD5E1'),
-    )
-    header_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+    try:
+        wb = openpyxl.Workbook()
+        default_sheet = wb.active
 
-    used_sheet_titles: Set[str] = set()
-    table_count = 0
-    document_text_blocks = []
+        thin_border = Border(
+            left=Side(style='thin', color='CBD5E1'),
+            right=Side(style='thin', color='CBD5E1'),
+            top=Side(style='thin', color='CBD5E1'),
+            bottom=Side(style='thin', color='CBD5E1'),
+        )
+        header_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
 
-    for p_no, page in enumerate(doc, start=1):
-        tabs = page.find_tables()
-        table_bboxes = []
+        used_sheet_titles: Set[str] = set()
+        table_count = 0
+        document_text_blocks = []
 
-        for t_no, tab in enumerate(tabs, start=1):
-            extracted = tab.extract()
-            if not extracted:
-                continue
+        for p_no, page in enumerate(doc, start=1):
+            tabs = page.find_tables()
+            table_bboxes = []
 
-            table_count += 1
-            table_bboxes.append(tab.bbox)
-            sheet_title = sanitize_sheet_title(f"Page_{p_no}_Table_{t_no}", used_sheet_titles)
-            ws = wb.create_sheet(title=sheet_title)
+            for t_no, tab in enumerate(tabs, start=1):
+                extracted = tab.extract()
+                if not extracted:
+                    continue
 
-            for r_idx, row in enumerate(extracted, start=1):
-                is_header = (r_idx == 1)
-                for c_idx, cell_val in enumerate(row, start=1):
-                    c_str = "" if cell_val is None else str(cell_val).strip()
-                    parsed = parse_numeric(c_str)
-                    excel_cell = ws.cell(row=r_idx, column=c_idx, value=parsed)
-                    excel_cell.border = thin_border
-                    if is_header:
-                        excel_cell.font = Font(bold=True)
-                        excel_cell.fill = header_fill
+                table_count += 1
+                table_bboxes.append(tab.bbox)
+                sheet_title = sanitize_sheet_title(f"Page_{p_no}_Table_{t_no}", used_sheet_titles)
+                ws = wb.create_sheet(title=sheet_title)
 
-            for col in ws.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                for c in col:
-                    if c.value is not None:
-                        lines = str(c.value).split("\n")
-                        max_len = max(max_len, max(len(l) for l in lines))
-                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+                for r_idx, row in enumerate(extracted, start=1):
+                    is_header = (r_idx == 1)
+                    for c_idx, cell_val in enumerate(row, start=1):
+                        c_str = "" if cell_val is None else str(cell_val).strip()
+                        parsed = parse_numeric(c_str)
+                        excel_cell = ws.cell(row=r_idx, column=c_idx, value=parsed)
+                        excel_cell.border = thin_border
+                        if is_header:
+                            excel_cell.font = Font(bold=True)
+                            excel_cell.fill = header_fill
 
-        blocks = page.get_text("blocks")
-        for b in blocks:
-            b_rect = fitz.Rect(b[0], b[1], b[2], b[3])
-            b_text = b[4].strip()
-            if not b_text:
-                continue
-            in_table = any(b_rect.intersects(fitz.Rect(t_box)) for t_box in table_bboxes)
-            if not in_table or table_count == 0:
-                document_text_blocks.append((p_no, b_text))
+                for col in ws.columns:
+                    max_len = 0
+                    col_letter = get_column_letter(col[0].column)
+                    for c in col:
+                        if c.value is not None:
+                            lines = str(c.value).split("\n")
+                            max_len = max(max_len, max(len(l) for l in lines))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
 
-    text_sheet_title = sanitize_sheet_title("Document Text", used_sheet_titles)
-    ws_text = wb.create_sheet(title=text_sheet_title, index=0)
-    ws_text.cell(row=1, column=1, value="Page").font = Font(bold=True)
-    ws_text.cell(row=1, column=1).fill = header_fill
-    ws_text.cell(row=1, column=1).border = thin_border
-    ws_text.cell(row=1, column=2, value="Content").font = Font(bold=True)
-    ws_text.cell(row=1, column=2).fill = header_fill
-    ws_text.cell(row=1, column=2).border = thin_border
+            blocks = page.get_text("blocks")
+            for b in blocks:
+                b_rect = fitz.Rect(b[0], b[1], b[2], b[3])
+                b_text = b[4].strip()
+                if not b_text:
+                    continue
+                in_table = any(b_rect.intersects(fitz.Rect(t_box)) for t_box in table_bboxes)
+                if not in_table or table_count == 0:
+                    document_text_blocks.append((p_no, b_text))
 
-    if document_text_blocks:
-        for idx, (p_no, txt) in enumerate(document_text_blocks, start=2):
-            c1 = ws_text.cell(row=idx, column=1, value=p_no)
-            c2 = ws_text.cell(row=idx, column=2, value=txt)
+        text_sheet_title = sanitize_sheet_title("Document Text", used_sheet_titles)
+        ws_text = wb.create_sheet(title=text_sheet_title, index=0)
+        ws_text.cell(row=1, column=1, value="Page").font = Font(bold=True)
+        ws_text.cell(row=1, column=1).fill = header_fill
+        ws_text.cell(row=1, column=1).border = thin_border
+        ws_text.cell(row=1, column=2, value="Content").font = Font(bold=True)
+        ws_text.cell(row=1, column=2).fill = header_fill
+        ws_text.cell(row=1, column=2).border = thin_border
+
+        if document_text_blocks:
+            for idx, (p_no, txt) in enumerate(document_text_blocks, start=2):
+                c1 = ws_text.cell(row=idx, column=1, value=p_no)
+                c2 = ws_text.cell(row=idx, column=2, value=txt)
+                c1.border = thin_border
+                c2.border = thin_border
+        else:
+            c1 = ws_text.cell(row=2, column=1, value=1)
+            c2 = ws_text.cell(row=2, column=2, value="No standalone text found outside tables.")
             c1.border = thin_border
             c2.border = thin_border
-    else:
-        c1 = ws_text.cell(row=2, column=1, value=1)
-        c2 = ws_text.cell(row=2, column=2, value="No standalone text found outside tables.")
-        c1.border = thin_border
-        c2.border = thin_border
 
-    for col in ws_text.columns:
-        max_len = 0
-        col_letter = get_column_letter(col[0].column)
-        for c in col:
-            if c.value is not None:
-                lines = str(c.value).split("\n")
-                max_len = max(max_len, max(len(l) for l in lines))
-        ws_text.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 65)
+        for col in ws_text.columns:
+            max_len = 0
+            col_letter = get_column_letter(col[0].column)
+            for c in col:
+                if c.value is not None:
+                    lines = str(c.value).split("\n")
+                    max_len = max(max_len, max(len(l) for l in lines))
+            ws_text.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 65)
 
-    if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
-        wb.remove(default_sheet)
+        if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
+            wb.remove(default_sheet)
 
-    doc.close()
-    out_io = io.BytesIO()
-    wb.save(out_io)
-    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_count
+        out_io = io.BytesIO()
+        wb.save(out_io)
+        wb.close()
+        return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_count
+    finally:
+        doc.close()
+        gc.collect()
 
 
 def convert_via_libreoffice(input_bytes: bytes, suffix: str) -> Optional[bytes]:
@@ -1411,53 +1441,61 @@ def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
 
 def pdf_to_pptx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
     """Creates presentation slides per PDF page with extracted text/tables or crisp image fallback."""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    blank_layout = prs.slide_layouts[6]
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
 
-    for p_no, page in enumerate(doc, start=1):
-        slide = prs.slides.add_slide(blank_layout)
-        text = page.get_text().strip()
-        tabs = page.find_tables()
-        table_list = tabs.tables if hasattr(tabs, "tables") else list(tabs)
+    try:
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+        blank_layout = prs.slide_layouts[6]
 
-        if text or len(table_list) > 0:
-            # Text / table slide
-            t_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(0.8))
-            t_box.text_frame.paragraphs[0].text = f"Page {p_no}"
-            t_box.text_frame.paragraphs[0].font.size = Pt(24)
-            t_box.text_frame.paragraphs[0].font.bold = True
+        for p_no, page in enumerate(doc, start=1):
+            slide = prs.slides.add_slide(blank_layout)
+            text = page.get_text().strip()
+            tabs = page.find_tables()
+            table_list = tabs.tables if hasattr(tabs, "tables") else list(tabs)
 
-            content_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(11.7), Inches(5.2))
-            ctf = content_box.text_frame
-            ctf.word_wrap = True
+            if text or len(table_list) > 0:
+                # Text / table slide
+                t_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(0.8))
+                t_box.text_frame.paragraphs[0].text = f"Page {p_no}"
+                t_box.text_frame.paragraphs[0].font.size = Pt(24)
+                t_box.text_frame.paragraphs[0].font.bold = True
 
-            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-            for ln in lines[:15]:
-                p = ctf.add_paragraph()
-                p.text = ln
-                p.font.size = Pt(13)
+                content_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(11.7), Inches(5.2))
+                ctf = content_box.text_frame
+                ctf.word_wrap = True
 
-            if len(table_list) > 0:
-                extracted = table_list[0].extract()
-                if extracted:
-                    n_r = min(len(extracted), 6)
-                    n_c = min(len(extracted[0]), 6)
-                    shape = slide.shapes.add_table(n_r, n_c, Inches(0.8), Inches(4.5), Inches(11.7), Inches(2.2))
-                    for r_i in range(n_r):
-                        for c_i in range(n_c):
-                            shape.table.cell(r_i, c_i).text = str(extracted[r_i][c_i] or "")
-        else:
-            # Image slide fallback
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-            slide.shapes.add_picture(io.BytesIO(pix.tobytes("png")), Inches(1.5), Inches(0.5), Inches(10.33), Inches(6.5))
+                lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+                for ln in lines[:15]:
+                    p = ctf.add_paragraph()
+                    p.text = ln
+                    p.font.size = Pt(13)
 
-    doc.close()
-    out_io = io.BytesIO()
-    prs.save(out_io)
-    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", len(prs.slides)
+                if len(table_list) > 0:
+                    extracted = table_list[0].extract()
+                    if extracted:
+                        n_r = min(len(extracted), 6)
+                        n_c = min(len(extracted[0]), 6)
+                        shape = slide.shapes.add_table(n_r, n_c, Inches(0.8), Inches(4.5), Inches(11.7), Inches(2.2))
+                        for r_i in range(n_r):
+                            for c_i in range(n_c):
+                                shape.table.cell(r_i, c_i).text = str(extracted[r_i][c_i] or "")
+            else:
+                # Image slide fallback
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                slide.shapes.add_picture(io.BytesIO(pix.tobytes("png")), Inches(1.5), Inches(0.5), Inches(10.33), Inches(6.5))
+                del pix
+
+        out_io = io.BytesIO()
+        prs.save(out_io)
+        return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", len(prs.slides)
+    finally:
+        doc.close()
+        gc.collect()
 
 
 # --- CSV (.csv) Converters ---
@@ -1632,8 +1670,10 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
 
     elif input_fmt == "pdf":
         doc = fitz.open(stream=data_bytes, filetype="pdf")
-        text = "\n\n".join(f"--- Page {i} ---\n" + page.get_text() for i, page in enumerate(doc, start=1))
-        doc.close()
+        try:
+            text = "\n\n".join(f"--- Page {i} ---\n" + page.get_text() for i, page in enumerate(doc, start=1))
+        finally:
+            doc.close()
 
     elif input_fmt == "docx":
         doc = Document(io.BytesIO(data_bytes))
@@ -2040,6 +2080,8 @@ def batch_convert(
             except Exception as e:
                 logger.warning(f"Batch conversion failed for file '{original_filename}': {e}")
                 warnings.append(f"'{original_filename}': Conversion to {target.upper()} failed: {str(e)}")
+            finally:
+                gc.collect()
 
         if warnings:
             report_text = "Velmo Batch Processing Report\n"
@@ -2265,6 +2307,7 @@ def preview_pdf_pages(pdf_bytes: bytes, max_pages: int = 15, dpi: int = 130) -> 
             # Render page at specified DPI (130) without alpha for crisp, compact JPEG
             pix = page.get_pixmap(dpi=dpi, alpha=False)
             img_bytes = pix.tobytes("jpeg", jpg_quality=88)
+            del pix
             b64_str = base64.b64encode(img_bytes).decode("ascii")
             pages_b64.append(f"data:image/jpeg;base64,{b64_str}")
 
@@ -2274,4 +2317,5 @@ def preview_pdf_pages(pdf_bytes: bytes, max_pages: int = 15, dpi: int = 130) -> 
         }
     finally:
         doc.close()
+        gc.collect()
 

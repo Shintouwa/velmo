@@ -1,10 +1,16 @@
 import base64
+import gc
 import io
 import logging
 import os
 from pathlib import Path
 from typing import List, Optional
 import zipfile
+
+# Limit native BLAS/OpenMP CPU threads to prevent memory spikes on 512MB RAM
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse, Response, JSONResponse
@@ -197,6 +203,9 @@ async def universal_convert_endpoint(
     except Exception as e:
         logger.error(f"Conversion error to '{fmt}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Conversion error: {str(e)}")
+    finally:
+        del input_files
+        gc.collect()
 
 
 # --- Batch Conversion Endpoint ---
@@ -267,6 +276,9 @@ async def batch_convert_endpoint(
     except Exception as e:
         logger.error(f"Batch conversion error to '{fmt}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Batch conversion error: {str(e)}")
+    finally:
+        del input_files
+        gc.collect()
 
 
 # --- In-Browser Editable Preview & Export Endpoints ---
@@ -327,6 +339,9 @@ async def preview_editable_endpoint(
     except Exception as e:
         logger.error(f"Preview extraction error for '{fmt}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Preview extraction error: {str(e)}")
+    finally:
+        del input_files
+        gc.collect()
 
 
 @app.post("/export-edited")
@@ -374,6 +389,8 @@ async def export_edited_endpoint(payload: ExportEditedPayload):
     except Exception as e:
         logger.error(f"Export edited error for '{fmt}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Export edited error: {str(e)}")
+    finally:
+        gc.collect()
 
 
 @app.post("/inspect-zip")
@@ -383,50 +400,54 @@ async def inspect_zip_endpoint(file: UploadFile = File(...)):
     if not raw or not zipfile.is_zipfile(io.BytesIO(raw)):
         raise HTTPException(status_code=400, detail="Uploaded file is not a valid ZIP archive.")
 
-    entries = []
-    with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
-        for info in zf.infolist():
-            if info.is_dir() or info.filename.endswith("/") or info.filename.endswith("\\"):
-                continue
-            name = converters.sanitize_filename(os.path.basename(info.filename))
-            full_path = info.filename
-            size = info.file_size
-            ext = Path(name).suffix.lower().lstrip(".")
+    try:
+        entries = []
+        with zipfile.ZipFile(io.BytesIO(raw), "r") as zf:
+            for info in zf.infolist():
+                if info.is_dir() or info.filename.endswith("/") or info.filename.endswith("\\"):
+                    continue
+                name = converters.sanitize_filename(os.path.basename(info.filename))
+                full_path = info.filename
+                size = info.file_size
+                ext = Path(name).suffix.lower().lstrip(".")
 
-            entry_data = {
-                "name": name,
-                "path": full_path,
-                "size": size,
-                "ext": ext,
-            }
+                entry_data = {
+                    "name": name,
+                    "path": full_path,
+                    "size": size,
+                    "ext": ext,
+                }
 
-            # Generate preview if image
-            if ext in ("png", "jpg", "jpeg", "webp"):
-                img_bytes = zf.read(info.filename)
-                mime = f"image/{ext if ext != 'jpg' else 'jpeg'}"
-                b64 = base64.b64encode(img_bytes).decode("ascii")
-                entry_data["type"] = "image"
-                entry_data["preview"] = f"data:{mime};base64,{b64}"
-            # Text/data preview
-            elif ext in ("txt", "csv", "md", "html"):
-                txt_bytes = zf.read(info.filename)
-                try:
-                    txt = txt_bytes.decode("utf-8")
-                except UnicodeDecodeError:
-                    txt = txt_bytes.decode("latin-1", errors="replace")
-                entry_data["type"] = "text"
-                entry_data["preview"] = txt[:3000]
-            else:
-                entry_data["type"] = "other"
-                entry_data["preview"] = None
+                # Generate preview if image
+                if ext in ("png", "jpg", "jpeg", "webp"):
+                    img_bytes = zf.read(info.filename)
+                    mime = f"image/{ext if ext != 'jpg' else 'jpeg'}"
+                    b64 = base64.b64encode(img_bytes).decode("ascii")
+                    entry_data["type"] = "image"
+                    entry_data["preview"] = f"data:{mime};base64,{b64}"
+                # Text/data preview
+                elif ext in ("txt", "csv", "md", "html"):
+                    txt_bytes = zf.read(info.filename)
+                    try:
+                        txt = txt_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        txt = txt_bytes.decode("latin-1", errors="replace")
+                    entry_data["type"] = "text"
+                    entry_data["preview"] = txt[:3000]
+                else:
+                    entry_data["type"] = "other"
+                    entry_data["preview"] = None
 
-            entries.append(entry_data)
+                entries.append(entry_data)
 
-    return JSONResponse(content={
-        "filename": converters.sanitize_filename(file.filename or "archive.zip"),
-        "total_files": len(entries),
-        "entries": entries,
-    })
+        return JSONResponse(content={
+            "filename": converters.sanitize_filename(file.filename or "archive.zip"),
+            "total_files": len(entries),
+            "entries": entries,
+        })
+    finally:
+        del raw
+        gc.collect()
 
 
 @app.post("/preview-pdf-pages")
@@ -457,6 +478,9 @@ async def preview_pdf_pages_endpoint(
     except Exception as e:
         logger.error(f"PDF page preview error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PDF page preview error: {str(e)}")
+    finally:
+        del raw
+        gc.collect()
 
 
 # --- Backward-Compatible Endpoints ---
@@ -468,14 +492,18 @@ async def convert_pdf_to_png_endpoint(file: UploadFile = File(...)):
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    base_name = converters.sanitize_base_name(file.filename)
-    content, media_type, out_name, page_cnt = converters.pdf_to_png(data, base_name)
-    safe_out_name = converters.sanitize_filename(out_name)
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Page-Count": str(page_cnt)},
-    )
+    try:
+        base_name = converters.sanitize_base_name(file.filename)
+        content, media_type, out_name, page_cnt = converters.pdf_to_png(data, base_name)
+        safe_out_name = converters.sanitize_filename(out_name)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Page-Count": str(page_cnt)},
+        )
+    finally:
+        del data
+        gc.collect()
 
 
 @app.post("/convert/image-to-pdf")
@@ -500,14 +528,18 @@ async def convert_image_to_pdf_endpoint(
             raise HTTPException(status_code=400, detail=f"File '{f_name}' is empty.")
         image_tuples.append((f_name, raw))
 
-    base_name = converters.sanitize_base_name(image_tuples[0][0])
-    content, media_type, out_name, cnt = converters.images_to_pdf(image_tuples, base_name)
-    safe_out_name = converters.sanitize_filename(out_name)
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Page-Count": str(cnt)},
-    )
+    try:
+        base_name = converters.sanitize_base_name(image_tuples[0][0])
+        content, media_type, out_name, cnt = converters.images_to_pdf(image_tuples, base_name)
+        safe_out_name = converters.sanitize_filename(out_name)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Page-Count": str(cnt)},
+        )
+    finally:
+        del image_tuples
+        gc.collect()
 
 
 @app.post("/convert/xlsx-to-docx")
@@ -517,14 +549,18 @@ async def convert_xlsx_to_docx_endpoint(file: UploadFile = File(...)):
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    base_name = converters.sanitize_base_name(file.filename)
-    content, media_type, out_name, cnt = converters.xlsx_to_docx(data, base_name)
-    safe_out_name = converters.sanitize_filename(out_name)
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Sheet-Count": str(cnt)},
-    )
+    try:
+        base_name = converters.sanitize_base_name(file.filename)
+        content, media_type, out_name, cnt = converters.xlsx_to_docx(data, base_name)
+        safe_out_name = converters.sanitize_filename(out_name)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Sheet-Count": str(cnt)},
+        )
+    finally:
+        del data
+        gc.collect()
 
 
 @app.post("/convert/docx-to-xlsx")
@@ -534,14 +570,18 @@ async def convert_docx_to_xlsx_endpoint(file: UploadFile = File(...)):
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    base_name = converters.sanitize_base_name(file.filename)
-    content, media_type, out_name, cnt = converters.docx_to_xlsx(data, base_name)
-    safe_out_name = converters.sanitize_filename(out_name)
-    return Response(
-        content=content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Table-Count": str(cnt)},
-    )
+    try:
+        base_name = converters.sanitize_base_name(file.filename)
+        content, media_type, out_name, cnt = converters.docx_to_xlsx(data, base_name)
+        safe_out_name = converters.sanitize_filename(out_name)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Table-Count": str(cnt)},
+        )
+    finally:
+        del data
+        gc.collect()
 
 
 # --- Programmatic SEO Landing Pages (Must be registered last to avoid shadowing) ---
@@ -571,4 +611,4 @@ if __name__ == "__main__":
     import os
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True, workers=1, limit_concurrency=4)
