@@ -1,3 +1,4 @@
+import base64
 import csv
 import html
 import io
@@ -2237,4 +2238,40 @@ def export_edited(
 
     else:
         raise ValueError(f"Unknown edit mode '{mode}'. Must be 'table' or 'document'.")
+
+
+# --- Fast Inline PDF Page Preview ---
+
+def preview_pdf_pages(pdf_bytes: bytes, max_pages: int = 15, dpi: int = 130) -> Dict[str, Any]:
+    """
+    Renders up to max_pages of a PDF document at 130 DPI JPEG as base64 data URLs for fast inline preview.
+    Returns:
+        {"total_pages": int, "pages": List[str]}
+    """
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
+
+    try:
+        total_pages = len(doc)
+        if total_pages == 0:
+            raise ValueError("PDF document has 0 pages or is empty.")
+
+        pages_b64: List[str] = []
+        limit = min(total_pages, max_pages)
+        for i in range(limit):
+            page = doc[i]
+            # Render page at specified DPI (130) without alpha for crisp, compact JPEG
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            img_bytes = pix.tobytes("jpeg", jpg_quality=88)
+            b64_str = base64.b64encode(img_bytes).decode("ascii")
+            pages_b64.append(f"data:image/jpeg;base64,{b64_str}")
+
+        return {
+            "total_pages": total_pages,
+            "pages": pages_b64,
+        }
+    finally:
+        doc.close()
 

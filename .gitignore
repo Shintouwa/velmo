@@ -36,3 +36,10 @@ desktop.ini
 .idea/
 *.sublime-project
 *.sublime-workspace
+
+# Internal test & development files
+test_server.py
+stress_test_matrix.py
+generate_samples.py
+Dockerfile
+.dockerignore

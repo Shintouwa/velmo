@@ -364,6 +364,36 @@ async def inspect_zip_endpoint(file: UploadFile = File(...)):
     })
 
 
+@app.post("/preview-pdf-pages")
+async def preview_pdf_pages_endpoint(
+    files: List[UploadFile] = File(default=[]),
+    file: Optional[UploadFile] = File(default=None),
+):
+    """
+    Renders up to the first 15 pages of a PDF document at 130 DPI JPEG as base64 data URLs.
+    """
+    upload_list = list(files) if files else []
+    if file and file.filename:
+        upload_list.append(file)
+
+    if not upload_list:
+        raise HTTPException(status_code=400, detail="No PDF file uploaded.")
+
+    target_file = upload_list[0]
+    raw = await target_file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail=f"Uploaded file '{target_file.filename}' is empty.")
+
+    try:
+        preview_data = converters.preview_pdf_pages(raw)
+        return JSONResponse(content=preview_data)
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
+    except Exception as e:
+        logger.error(f"PDF page preview error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"PDF page preview error: {str(e)}")
+
+
 # --- Backward-Compatible Endpoints ---
 
 @app.post("/convert/pdf-to-png")
