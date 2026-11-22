@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML_PATH = BASE_DIR / "index.html"
 
 SITE_URL = os.environ.get("SITE_URL", "https://velmo.onrender.com").rstrip("/")
-GOOGLE_SITE_VERIFICATION = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
+GOOGLE_SITE_VERIFICATION = os.environ.get("GOOGLE_SITE_VERIFICATION", "9I4P7-ptGQYEPMJ_A-W0Io430Ih0krvOA3tDoAt5VBA")
 BING_SITE_VERIFICATION = os.environ.get("BING_SITE_VERIFICATION", "")
 
 SUPPORTED_FORMATS = {

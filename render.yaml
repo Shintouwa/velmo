@@ -12,6 +12,6 @@ services:
       - key: SITE_URL
         value: https://velmo.onrender.com
       - key: GOOGLE_SITE_VERIFICATION
-        sync: false
+        value: 9I4P7-ptGQYEPMJ_A-W0Io430Ih0krvOA3tDoAt5VBA
       - key: BING_SITE_VERIFICATION
         sync: false
