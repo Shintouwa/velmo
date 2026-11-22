@@ -1556,6 +1556,333 @@
       }
     }
 
+    /* --- Programmatic SEO Section (Below the fold) --- */
+    .seo-section {
+      width: 100%;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      padding: 48px 20px 60px;
+      display: flex;
+      justify-content: center;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    .seo-container {
+      width: 100%;
+      max-width: 860px;
+      display: flex;
+      flex-direction: column;
+      gap: 32px;
+    }
+
+    .seo-breadcrumbs {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .seo-breadcrumbs a {
+      color: var(--text-muted);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .seo-breadcrumbs a:hover {
+      color: var(--primary);
+    }
+
+    .seo-tool-header {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .seo-badge {
+      display: inline-block;
+      align-self: flex-start;
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 3px 9px;
+      border-radius: 6px;
+      background: var(--primary-light);
+      color: var(--primary);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+    }
+
+    .seo-h2 {
+      font-size: 1.5rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      line-height: 1.3;
+    }
+
+    .seo-lead {
+      font-size: 0.92rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .seo-block {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .seo-h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .seo-steps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+
+    .seo-step-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .seo-step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--primary-light);
+      color: var(--primary);
+      font-weight: 800;
+      font-size: 0.82rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+    }
+
+    .seo-step-body {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .seo-tech-block {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .seo-tech-text {
+      font-size: 0.86rem;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .seo-faqs-accordion {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .seo-faq-item {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+
+    .seo-faq-item[open] {
+      border-color: var(--primary);
+    }
+
+    .seo-faq-question {
+      padding: 14px 18px;
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--text);
+      cursor: pointer;
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .seo-faq-question::-webkit-details-marker {
+      display: none;
+    }
+
+    .seo-faq-question::after {
+      content: '+';
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--primary);
+      transition: transform 0.2s;
+    }
+
+    .seo-faq-item[open] .seo-faq-question::after {
+      content: '−';
+    }
+
+    .seo-faq-answer {
+      padding: 0 18px 16px;
+      font-size: 0.84rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .seo-links-block {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding-top: 8px;
+    }
+
+    .seo-reverse-box {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      background: var(--card-subtle);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+
+    .seo-reverse-label {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--text-dim);
+    }
+
+    .seo-reverse-link {
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: var(--primary);
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .seo-reverse-link:hover {
+      text-decoration: underline;
+    }
+
+    .seo-related-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .seo-related-title {
+      font-size: 0.78rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
+    }
+
+    .seo-pills-wrap {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .seo-pill-link {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.76rem;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 6px;
+      transition: all 0.15s ease;
+    }
+
+    .seo-pill-link:hover {
+      border-color: var(--primary);
+      color: var(--primary);
+      background: var(--primary-light);
+      transform: translateY(-1px);
+    }
+
+    /* Homepage Popular Converters Hub Directory */
+    .seo-header-box {
+      text-align: center;
+      margin-bottom: 8px;
+    }
+
+    .seo-main-title {
+      font-size: 1.35rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .seo-main-sub {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .seo-categories-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+
+    .seo-category-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      box-shadow: var(--shadow-sm);
+    }
+
+    .seo-cat-title {
+      font-size: 0.82rem;
+      font-weight: 800;
+      color: var(--text);
+      margin-bottom: 12px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .seo-links-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .seo-route-link {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 500;
+      transition: color 0.15s ease;
+      display: block;
+    }
+
+    .seo-route-link:hover {
+      color: var(--primary);
+    }
+
     /* --- Footer --- */
     .footer {
       width: 100%;
@@ -3029,11 +3356,35 @@
       renderSessionHistory();
     });
 
+    // SEO Route Hydration
+    function hydrateSeoRouteState() {
+      const preselectTo = document.body.dataset.preselectTo;
+      const preselectFrom = document.body.dataset.preselectFrom;
+      if (preselectTo && preselectTo !== 'zip') {
+        const targetBtn = document.querySelector(`.format-btn[data-fmt="${preselectTo}"]`);
+        if (targetBtn) {
+          selectedTarget = preselectTo;
+          document.querySelectorAll('.format-btn').forEach(btn => btn.classList.remove('active'));
+          targetBtn.classList.add('active');
+          updateOptionsVisibility();
+          updateActionButtons();
+        }
+      }
+      if (preselectTo) {
+        const detectedInfo = document.getElementById('detectedFormatInfo');
+        if (detectedInfo && preselectFrom) {
+          detectedInfo.textContent = `🎯 Ready: ${preselectFrom.toUpperCase()} → ${preselectTo.toUpperCase()}`;
+          detectedInfo.classList.remove('muted');
+        }
+      }
+    }
+
     // Initial state
     hideAllStatus();
     updateDetectedFormatInfo();
     updateTargetButtons();
     updateActionButtons();
+    hydrateSeoRouteState();
   </script>
 </body>
 </html>

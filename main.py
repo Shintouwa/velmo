@@ -9,15 +9,22 @@ import zipfile
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import FileResponse, Response, JSONResponse
 from pydantic import BaseModel
+from starlette.middleware.gzip import GZipMiddleware
 
 import converters
+import seo_catalog
 
 logger = logging.getLogger("velmo")
 
 app = FastAPI(title="Velmo - 11-Format Universal Any-to-Any Converter", version="5.0.0")
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 BASE_DIR = Path(__file__).resolve().parent
 INDEX_HTML_PATH = BASE_DIR / "index.html"
+
+SITE_URL = os.environ.get("SITE_URL", "https://velmo.onrender.com").rstrip("/")
+GOOGLE_SITE_VERIFICATION = os.environ.get("GOOGLE_SITE_VERIFICATION", "")
+BING_SITE_VERIFICATION = os.environ.get("BING_SITE_VERIFICATION", "")
 
 SUPPORTED_FORMATS = {
     "pdf", "docx", "xlsx", "pptx", "csv", "txt", "md", "html", "png", "jpg", "jpeg", "webp"
@@ -35,7 +42,65 @@ CATEGORIES = {
 async def get_index():
     if not INDEX_HTML_PATH.exists():
         raise HTTPException(status_code=404, detail="index.html not found")
-    return FileResponse(INDEX_HTML_PATH, media_type="text/html")
+    raw_html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+    rendered_html = seo_catalog.render_html_page(
+        raw_html,
+        route_slug=None,
+        site_url=SITE_URL,
+        google_verification=GOOGLE_SITE_VERIFICATION,
+        bing_verification=BING_SITE_VERIFICATION,
+    )
+    return Response(
+        content=rendered_html,
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+    )
+
+
+@app.get("/robots.txt")
+async def get_robots():
+    return Response(
+        content=seo_catalog.get_robots_txt(SITE_URL),
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/sitemap.xml")
+async def get_sitemap():
+    return Response(
+        content=seo_catalog.get_sitemap_xml(SITE_URL),
+        media_type="application/xml; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/llms.txt")
+async def get_llms():
+    return Response(
+        content=seo_catalog.get_llms_txt(SITE_URL),
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@app.get("/favicon.ico")
+async def get_favicon():
+    return Response(
+        content=seo_catalog.FAVICON_SVG,
+        media_type="image/svg+xml; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@app.get("/og-image.png")
+async def get_og_image():
+    png_bytes = seo_catalog.generate_og_image()
+    return Response(
+        content=png_bytes,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/api/info")
@@ -476,6 +541,29 @@ async def convert_docx_to_xlsx_endpoint(file: UploadFile = File(...)):
         content=content,
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{safe_out_name}"', "X-Table-Count": str(cnt)},
+    )
+
+
+# --- Programmatic SEO Landing Pages (Must be registered last to avoid shadowing) ---
+
+@app.get("/{route_slug}")
+async def get_seo_landing_page(route_slug: str):
+    if route_slug not in seo_catalog.SEO_ROUTES:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if not INDEX_HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="index.html not found")
+    raw_html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+    rendered_html = seo_catalog.render_html_page(
+        raw_html,
+        route_slug=route_slug,
+        site_url=SITE_URL,
+        google_verification=GOOGLE_SITE_VERIFICATION,
+        bing_verification=BING_SITE_VERIFICATION,
+    )
+    return Response(
+        content=rendered_html,
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
     )
 
 

@@ -39,6 +39,8 @@ desktop.ini
 
 # Internal test & development files
 test_server.py
+test_seo.py
+seo_master_plan.md
 stress_test_matrix.py
 generate_samples.py
 Dockerfile
