@@ -29,12 +29,13 @@ class SeoRoute:
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
   <defs>
     <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#0284c7"/>
+      <stop offset="0%" stop-color="#FF4D1C"/>
+      <stop offset="100%" stop-color="#E53E10"/>
     </linearGradient>
   </defs>
-  <rect width="32" height="32" rx="8" fill="url(#g)"/>
-  <path d="M8 9l8 14 8-14h-4.5l-3.5 6.5L12.5 9z" fill="#ffffff"/>
+  <rect width="32" height="32" rx="8" fill="#09090B"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7.5" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <path d="M8 9l8 14 8-14h-4.5l-3.5 6.5L12.5 9z" fill="url(#g)"/>
 </svg>"""
 
 SEO_ROUTES: Dict[str, SeoRoute] = {
@@ -971,31 +972,34 @@ _OG_IMAGE_BYTES: Optional[bytes] = None
 def generate_og_image() -> bytes:
     """
     Generates a crisp 1200x630 high-contrast social preview card for Velmo
-    using Pillow, caching the result in memory.
+    matching the Obsidian + Vermilion Ember aesthetic using Pillow, caching the result in memory.
     """
     global _OG_IMAGE_BYTES
     if _OG_IMAGE_BYTES is not None:
         return _OG_IMAGE_BYTES
 
     width, height = 1200, 630
-    # Background #090d16
-    im = Image.new("RGB", (width, height), color=(9, 13, 22))
+    # Background #09090B (Deep Obsidian)
+    im = Image.new("RGB", (width, height), color=(9, 9, 11))
     draw = ImageDraw.Draw(im)
 
-    # Accent decorative glow / card container
-    draw.rectangle([24, 24, width - 24, height - 24], outline=(45, 55, 72), width=2)
-    draw.rounded_rectangle([40, 40, width - 40, height - 40], radius=16, fill=(17, 24, 39), outline=(99, 102, 241), width=2)
+    # Architectural hairline outer frame
+    draw.rectangle([20, 20, width - 20, height - 20], outline=(30, 30, 36), width=1)
+    
+    # Elevated Carbon Card (#111114) with subtle specular top edge
+    draw.rounded_rectangle([36, 36, width - 36, height - 36], radius=16, fill=(17, 17, 20), outline=(42, 42, 50), width=1)
+    draw.line([(44, 37), (width - 44, 37)], fill=(255, 77, 28), width=2)
 
-    # Brand icon box: 90x90 gradient pill
+    # Brand icon box: Vermilion Ember pill
     icon_x, icon_y = 80, 80
-    draw.rounded_rectangle([icon_x, icon_y, icon_x + 90, icon_y + 90], radius=20, fill=(99, 102, 241))
+    draw.rounded_rectangle([icon_x, icon_y, icon_x + 88, icon_y + 88], radius=18, fill=(255, 77, 28))
     draw.polygon(
         [
-            (icon_x + 24, icon_y + 24),
+            (icon_x + 22, icon_y + 24),
             (icon_x + 66, icon_y + 24),
             (icon_x + 55, icon_y + 44),
-            (icon_x + 45, icon_y + 66),
-            (icon_x + 35, icon_y + 44),
+            (icon_x + 44, icon_y + 64),
+            (icon_x + 33, icon_y + 44),
         ],
         fill=(255, 255, 255)
     )
@@ -1006,7 +1010,7 @@ def generate_og_image() -> bytes:
     font_small = None
     for name in ["segoeui.ttf", "arial.ttf", "calibri.ttf", "DejaVuSans.ttf"]:
         try:
-            font_large = ImageFont.truetype(name, 56)
+            font_large = ImageFont.truetype(name, 54)
             font_sub = ImageFont.truetype(name, 26)
             font_small = ImageFont.truetype(name, 18)
             break
@@ -1019,21 +1023,21 @@ def generate_og_image() -> bytes:
         font_small = font_large
 
     # Brand name
-    draw.text((icon_x + 115, icon_y + 12), "Velmo Studio", fill=(248, 250, 252), font=font_large)
+    draw.text((icon_x + 115, icon_y + 14), "Velmo Studio", fill=(250, 250, 250), font=font_large)
 
     # Tagline
     draw.text(
         (80, 205),
         "Universal 11-Format Any-to-Any Document Converter",
-        fill=(248, 250, 252),
+        fill=(250, 250, 250),
         font=font_sub
     )
 
     # Secondary explanation
     draw.text(
         (80, 250),
-        "High-contrast, unrestricted conversion with in-browser editing & local neural OCR.",
-        fill=(148, 163, 184),
+        "High-craft, private conversion with in-browser editing & local neural OCR.",
+        fill=(161, 161, 170),
         font=font_small
     )
 
@@ -1042,28 +1046,28 @@ def generate_og_image() -> bytes:
     bx, by = 80, 315
     for fmt in formats:
         badge_w = max(68, len(fmt) * 16 + 24)
-        draw.rounded_rectangle([bx, by, bx + badge_w, by + 40], radius=8, fill=(26, 34, 52), outline=(45, 55, 72), width=1)
-        draw.text((bx + 14, by + 10), fmt, fill=(129, 140, 248), font=font_small)
+        draw.rounded_rectangle([bx, by, bx + badge_w, by + 40], radius=8, fill=(23, 23, 27), outline=(45, 45, 54), width=1)
+        draw.text((bx + 14, by + 10), fmt, fill=(255, 77, 28), font=font_small)
         bx += badge_w + 14
 
-    # Value proposition pills at bottom
+    # Value proposition pills at bottom (No raw emojis)
     features = [
-        "⚡ 100% In-Memory Processing",
-        "🔒 Zero File Retention & No Signup",
-        "🧠 Local Neural OCR Table Extraction",
-        "📦 Instant ZIP Batch Bundling"
+        "Private In-Memory Stream Processing",
+        "Zero File Retention & No Signup",
+        "Local Neural OCR Table Extraction",
+        "Instant ZIP Batch Bundling"
     ]
     fx, fy = 80, 420
     for feat in features:
-        draw.rounded_rectangle([fx, fy, fx + 500, fy + 48], radius=10, fill=(15, 23, 42), outline=(30, 41, 59), width=1)
-        draw.text((fx + 18, fy + 14), feat, fill=(226, 232, 240), font=font_small)
+        draw.rounded_rectangle([fx, fy, fx + 500, fy + 48], radius=10, fill=(23, 23, 27), outline=(42, 42, 50), width=1)
+        draw.text((fx + 20, fy + 14), feat, fill=(228, 228, 231), font=font_small)
         fy += 60
         if fy > 530:
             fx += 520
             fy = 420
 
     # Domain watermark
-    draw.text((width - 340, height - 75), "velmo.onrender.com", fill=(100, 116, 139), font=font_small)
+    draw.text((width - 340, height - 75), "velmo.onrender.com", fill=(113, 113, 122), font=font_small)
 
     buf = io.BytesIO()
     im.save(buf, format="PNG", optimize=True)
@@ -1076,6 +1080,7 @@ def get_robots_txt(site_url: str = "https://velmo.onrender.com") -> str:
     site_url = site_url.rstrip("/")
     return f"""User-agent: *
 Allow: /
+Allow: /tools
 Disallow: /convert
 Disallow: /convert/batch
 Disallow: /preview-editable
@@ -1088,7 +1093,7 @@ Sitemap: {site_url}/sitemap.xml
 
 
 def get_sitemap_xml(site_url: str = "https://velmo.onrender.com") -> str:
-    """Generates dynamic XML sitemap covering root and all 28 registered programmatic routes."""
+    """Generates dynamic XML sitemap covering root, /tools, and all 28 registered programmatic routes."""
     site_url = site_url.rstrip("/")
     xml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -1097,6 +1102,11 @@ def get_sitemap_xml(site_url: str = "https://velmo.onrender.com") -> str:
         f'    <loc>{site_url}/</loc>',
         '    <changefreq>daily</changefreq>',
         '    <priority>1.0</priority>',
+        '  </url>',
+        '  <url>',
+        f'    <loc>{site_url}/tools</loc>',
+        '    <changefreq>weekly</changefreq>',
+        '    <priority>0.9</priority>',
         '  </url>',
     ]
 
@@ -1139,6 +1149,7 @@ def get_llms_txt(site_url: str = "https://velmo.onrender.com") -> str:
         "- **Text & Web**: Markdown (.md), Plain Text (.txt), HTML (.html)",
         "",
         "## High-Intent Conversion Routes",
+        f"- [All 28 Conversion Tools]({site_url}/tools): Complete catalog of all 28 specialized document, spreadsheet, image, OCR, and developer conversion routes.",
     ]
 
     for slug, r in SEO_ROUTES.items():
@@ -1196,7 +1207,27 @@ def get_json_ld_schemas(route_slug: Optional[str], site_url: str = "https://velm
 
     schemas = [web_app_schema]
 
-    if route_slug and route_slug in SEO_ROUTES:
+    if route_slug == "tools":
+        breadcrumb_schema = {
+            "@context": "https://schema.org",
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": 1,
+                    "name": "Velmo Home",
+                    "item": f"{site_url}/",
+                },
+                {
+                    "@type": "ListItem",
+                    "position": 2,
+                    "name": "All 28 Conversion Tools",
+                    "item": f"{site_url}/tools",
+                }
+            ]
+        }
+        schemas.append(breadcrumb_schema)
+    elif route_slug and route_slug in SEO_ROUTES:
         route = SEO_ROUTES[route_slug]
         breadcrumb_schema = {
             "@context": "https://schema.org",
@@ -1247,58 +1278,88 @@ def get_json_ld_schemas(route_slug: Optional[str], site_url: str = "https://velm
 def render_below_the_fold_content(route_slug: Optional[str], site_url: str = "https://velmo.onrender.com") -> str:
     """
     Renders clean, high-contrast SEO sections below the fold.
-    For root (/): renders a structured Popular Converters directory.
-    For conversion routes: renders breadcrumbs, how-to steps, technical breakdown, FAQs, and reverse/related links.
+    For root (/): returns "" (homepage ends cleanly right after studio converter).
+    For /tools: renders dedicated clean catalog of all 28 tools.
+    For conversion routes: renders sleek, airy breadcrumbs, how-to steps, tech specs, FAQs, and reverse/related links.
     """
     site_url = site_url.rstrip("/")
 
-    if not route_slug or route_slug not in SEO_ROUTES:
-        # Homepage directory linking to all 28 routes
+    # Homepage has ZERO congestion below the fold
+    if not route_slug:
+        return ""
+
+    # Dedicated /tools directory
+    if route_slug == "tools":
         categories = {
-            "📄 Document Converters": [
-                "pdf-to-word", "word-to-pdf", "pdf-to-pptx", "pptx-to-pdf",
-                "pdf-to-txt", "word-to-txt", "pdf-to-markdown", "word-to-html"
-            ],
-            "📊 Spreadsheet & Data Tools": [
-                "pdf-to-excel", "excel-to-pdf", "image-to-excel", "excel-to-word",
-                "word-to-excel", "csv-to-excel", "excel-to-csv", "csv-to-pdf"
-            ],
-            "🖼️ Image & OCR Workflows": [
-                "image-to-word", "image-to-pdf", "pdf-to-png", "pdf-to-jpg",
-                "png-to-jpg", "jpg-to-png", "webp-to-png", "png-to-webp"
-            ],
-            "🌐 Markdown & Developer Utilities": [
-                "markdown-to-pdf", "markdown-to-word", "html-to-pdf", "batch-converter"
-            ]
+            "Document Converters": (
+                '<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>',
+                [
+                    "pdf-to-word", "word-to-pdf", "pdf-to-pptx", "pptx-to-pdf",
+                    "pdf-to-txt", "word-to-txt", "pdf-to-markdown", "word-to-html"
+                ]
+            ),
+            "Spreadsheet & Data Tools": (
+                '<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>',
+                [
+                    "pdf-to-excel", "excel-to-pdf", "image-to-excel", "excel-to-word",
+                    "word-to-excel", "csv-to-excel", "excel-to-csv", "csv-to-pdf"
+                ]
+            ),
+            "Image & OCR Workflows": (
+                '<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>',
+                [
+                    "image-to-word", "image-to-pdf", "pdf-to-png", "pdf-to-jpg",
+                    "png-to-jpg", "jpg-to-png", "webp-to-png", "png-to-webp"
+                ]
+            ),
+            "Markdown & Developer Utilities": (
+                '<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
+                [
+                    "markdown-to-pdf", "markdown-to-word", "html-to-pdf", "batch-converter"
+                ]
+            )
         }
 
         html = [
-            '<section class="seo-section" id="seoHubSection">',
+            '<section class="seo-section" id="toolsDirectorySection">',
             '  <div class="seo-container">',
-            '    <div class="seo-header-box">',
-            '      <h2 class="seo-main-title">Popular Document &amp; Image Converters</h2>',
-            '      <p class="seo-main-sub">Dedicated, high-speed tools across all 11 supported formats. 100% free, private in-memory processing.</p>',
+            '    <nav class="seo-breadcrumbs" aria-label="Breadcrumb">',
+            '      <a href="/">Velmo Studio</a> &rsaquo;',
+            '      <span>All 28 Conversion Tools</span>',
+            '    </nav>',
+            '    <div class="seo-tool-header">',
+            '      <span class="seo-badge">Universal Directory</span>',
+            '      <h2 class="seo-h2">All 28 Document &amp; Image Conversion Tools</h2>',
+            '      <p class="seo-lead">Dedicated high-speed conversion tools across all 11 supported formats. 100% free, private in-memory processing with zero file retention.</p>',
             '    </div>',
             '    <div class="seo-categories-grid">',
         ]
 
-        for cat_name, slugs in categories.items():
+        for cat_name, (icon_svg, slugs) in categories.items():
             html.append('      <div class="seo-category-card">')
-            html.append(f'        <h3 class="seo-cat-title">{cat_name}</h3>')
+            html.append(f'        <h3 class="seo-cat-title">{icon_svg} <span>{cat_name}</span></h3>')
             html.append('        <ul class="seo-links-list">')
             for s in slugs:
                 if s in SEO_ROUTES:
                     r = SEO_ROUTES[s]
-                    html.append(f'          <li><a href="/{s}" class="seo-route-link" title="{r.title}">{r.h1}</a></li>')
+                    from_label = r.from_fmt.upper() if r.from_fmt else "MULTI"
+                    to_label = r.to_fmt.upper() if r.to_fmt else "ZIP"
+                    html.append(f'          <li><a href="/{s}" class="seo-route-link" title="{xml_escape(r.title)}"><span class="seo-tool-pills">{from_label} &rarr; {to_label}</span><span class="seo-tool-title">{xml_escape(r.h1)}</span><span class="seo-tool-arrow">&nearr;</span></a></li>')
             html.append('        </ul>')
             html.append('      </div>')
 
         html.extend([
             '    </div>',
+            '    <div style="text-align: center; margin-top: 36px;">',
+            '      <a href="/" class="btn-secondary" style="text-decoration: none; display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px;">&larr; Return to Studio Converter</a>',
+            '    </div>',
             '  </div>',
             '</section>',
         ])
         return "\n".join(html)
+
+    if route_slug not in SEO_ROUTES:
+        return ""
 
     # Conversion route specific landing section
     route = SEO_ROUTES[route_slug]
@@ -1308,8 +1369,11 @@ def render_below_the_fold_content(route_slug: Optional[str], site_url: str = "ht
         rev = SEO_ROUTES[route.reverse_slug]
         reverse_link_html = f"""
         <div class="seo-reverse-box">
-          <span class="seo-reverse-label">🔄 Reverse Conversion:</span>
-          <a href="/{rev.slug}" class="seo-reverse-link" title="{rev.title}">{rev.h1} &rarr;</a>
+          <span class="seo-reverse-label">
+            <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 16V4m0 0L3 8m4-4l4 4m6 4v12m0 0l4-4m-4 4l-4-4"/></svg>
+            Reverse Conversion:
+          </span>
+          <a href="/{rev.slug}" class="seo-reverse-link" title="{xml_escape(rev.title)}">{xml_escape(rev.h1)} &rarr;</a>
         </div>
         """
 
@@ -1318,14 +1382,14 @@ def render_below_the_fold_content(route_slug: Optional[str], site_url: str = "ht
         if rel_slug in SEO_ROUTES:
             rel = SEO_ROUTES[rel_slug]
             related_links_html.append(
-                f'<a href="/{rel.slug}" class="seo-pill-link" title="{rel.title}">{rel.h1}</a>'
+                f'<a href="/{rel.slug}" class="seo-pill-link" title="{xml_escape(rel.title)}">{xml_escape(rel.h1)}</a>'
             )
 
     steps_html = []
     for idx, step_text in enumerate(route.how_to_steps, 1):
         steps_html.append(f"""
           <div class="seo-step-card">
-            <div class="seo-step-num">{idx}</div>
+            <div class="seo-step-num">{idx:02d}</div>
             <div class="seo-step-body">{xml_escape(step_text)}</div>
           </div>
         """)
@@ -1334,7 +1398,10 @@ def render_below_the_fold_content(route_slug: Optional[str], site_url: str = "ht
     for f in route.faqs:
         faqs_html.append(f"""
           <details class="seo-faq-item">
-            <summary class="seo-faq-question">{xml_escape(f['q'])}</summary>
+            <summary class="seo-faq-question">
+              <span>{xml_escape(f['q'])}</span>
+              <svg class="faq-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+            </summary>
             <div class="seo-faq-answer">{xml_escape(f['a'])}</div>
           </details>
         """)
@@ -1344,7 +1411,8 @@ def render_below_the_fold_content(route_slug: Optional[str], site_url: str = "ht
       <div class="seo-container">
         <!-- Breadcrumbs -->
         <nav class="seo-breadcrumbs" aria-label="Breadcrumb">
-          <a href="/">Velmo</a> &rsaquo;
+          <a href="/">Velmo Studio</a> &rsaquo;
+          <a href="/tools">All Tools</a> &rsaquo;
           <span>{xml_escape(route.h1)}</span>
         </nav>
 
@@ -1401,13 +1469,19 @@ def render_html_page(
     bing_verification: str = "",
 ) -> str:
     """
-    Renders full server-rendered HTML for either root (/) or any of the 28 programmatic routes.
+    Renders full server-rendered HTML for root (/), /tools, or any of the 28 programmatic routes.
     Injects dynamic title, meta description, canonical tag, OpenGraph tags, JSON-LD schemas,
     site verification meta tags, preselection attributes, and below-the-fold content.
     """
     site_url = site_url.rstrip("/")
 
-    if route_slug and route_slug in SEO_ROUTES:
+    if route_slug == "tools":
+        page_title = "All 28 Document & Image Converters — Velmo Tools Directory"
+        page_description = "Browse all 28 specialized document, spreadsheet, image, OCR, and developer file conversion tools available on Velmo. Free, private, and unlimited."
+        canonical_url = f"{site_url}/tools"
+        preselect_from = ""
+        preselect_to = ""
+    elif route_slug and route_slug in SEO_ROUTES:
         route = SEO_ROUTES[route_slug]
         page_title = route.title
         page_description = route.description
@@ -1490,13 +1564,14 @@ def render_html_page(
         count=1,
     )
 
-    # Inject below-the-fold content right before footer
-    if '<footer class="footer">' in rendered:
-        rendered = rendered.replace(
-            '<footer class="footer">',
-            f"{below_the_fold_html}\n  <footer class=\"footer\">"
-        )
-    else:
-        rendered = rendered.replace('</body>', f"{below_the_fold_html}\n</body>")
+    # Inject below-the-fold content right before footer (if any content to inject)
+    if below_the_fold_html:
+        if '<footer class="footer">' in rendered:
+            rendered = rendered.replace(
+                '<footer class="footer">',
+                f"{below_the_fold_html}\n  <footer class=\"footer\">"
+            )
+        else:
+            rendered = rendered.replace('</body>', f"{below_the_fold_html}\n</body>")
 
     return rendered

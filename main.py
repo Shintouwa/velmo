@@ -63,6 +63,25 @@ async def get_index():
     )
 
 
+@app.get("/tools")
+async def get_tools_directory():
+    if not INDEX_HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="index.html not found")
+    raw_html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+    rendered_html = seo_catalog.render_html_page(
+        raw_html,
+        route_slug="tools",
+        site_url=SITE_URL,
+        google_verification=GOOGLE_SITE_VERIFICATION,
+        bing_verification=BING_SITE_VERIFICATION,
+    )
+    return Response(
+        content=rendered_html,
+        media_type="text/html",
+        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+    )
+
+
 @app.get("/robots.txt")
 async def get_robots():
     return Response(

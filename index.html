@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#09090B">
+  <meta name="color-scheme" content="dark light">
   <title>Velmo Studio — Universal 11-Format Any-to-Any Document Converter</title>
   <meta name="description" content="Velmo — Universal 11-Format Any-to-Any Document Converter with in-browser editing &amp; local OCR.">
   <meta name="application-name" content="Velmo">
@@ -10,92 +12,149 @@
   <meta property="og:description" content="High-contrast, unrestricted conversion across 11 formats with in-browser editing &amp; local OCR.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Instrument+Serif:ital@1&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
-    /* --- CSS Variables & High-Contrast Design System --- */
+    /* --- Obsidian & Vellum Design System --- */
+    :root {
+      --font-heading: 'Bricolage Grotesque', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-serif: 'Instrument Serif', Georgia, serif;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      color-scheme: dark light;
+    }
+
     :root[data-theme="dark"] {
-      --bg: #090d16;
-      --card-bg: #111827;
-      --card-subtle: #1a2234;
-      --card-hover: #222d42;
-      --border: #2d3748;
-      --border-focus: #6366f1;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --primary: #6366f1;
-      --primary-hover: #4f46e5;
-      --primary-light: rgba(99, 102, 241, 0.15);
-      --secondary: #0284c7;
-      --secondary-hover: #0369a1;
-      --secondary-light: rgba(2, 132, 199, 0.15);
-      --success: #10b981;
+      --bg: #09090B;
+      --dot-color: rgba(255, 255, 255, 0.045);
+      --card-bg: #111114;
+      --card-subtle: #17171B;
+      --card-hover: #1E1E24;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(255, 255, 255, 0.16);
+      --border-focus: #FF4D1C;
+      --specular: rgba(255, 255, 255, 0.08);
+      --text: #FAFAFA;
+      --text-muted: #A1A1AA;
+      --text-dim: #71717A;
+      --primary: #FF4D1C;
+      --primary-hover: #FF6236;
+      --primary-active: #E03E10;
+      --primary-light: rgba(255, 77, 28, 0.12);
+      --primary-glow: rgba(255, 77, 28, 0.35);
+      --secondary-btn-bg: rgba(255, 255, 255, 0.05);
+      --secondary-btn-border: rgba(255, 255, 255, 0.12);
+      --secondary-btn-hover: rgba(255, 255, 255, 0.10);
+      --secondary-btn-text: #FAFAFA;
+      --success: #10B981;
       --success-hover: #059669;
-      --success-light: rgba(16, 185, 129, 0.15);
-      --error: #f43f5e;
-      --error-light: rgba(244, 63, 94, 0.15);
+      --success-light: rgba(16, 185, 129, 0.12);
+      --error: #EF4444;
+      --error-light: rgba(239, 68, 68, 0.12);
       --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.4);
-      --shadow-md: 0 8px 16px -2px rgba(0, 0, 0, 0.5);
-      --shadow-lg: 0 20px 30px -4px rgba(0, 0, 0, 0.6);
-      --mono-font: 'JetBrains Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+      --shadow-md: 0 8px 24px -4px rgba(0, 0, 0, 0.6);
+      --shadow-lg: 0 24px 48px -8px rgba(0, 0, 0, 0.7);
     }
 
     :root[data-theme="light"] {
-      --bg: #f8fafc;
-      --card-bg: #ffffff;
-      --card-subtle: #f1f5f9;
-      --card-hover: #e2e8f0;
-      --border: #cbd5e1;
-      --border-focus: #4f46e5;
-      --text: #0f172a;
-      --text-muted: #475569;
-      --text-dim: #64748b;
-      --primary: #4f46e5;
-      --primary-hover: #4338ca;
-      --primary-light: #eef2ff;
-      --secondary: #0284c7;
-      --secondary-hover: #0369a1;
-      --secondary-light: #e0f2fe;
+      --bg: #F5F3EE;
+      --dot-color: rgba(17, 17, 19, 0.04);
+      --card-bg: #FFFFFF;
+      --card-subtle: #ECE8E1;
+      --card-hover: #E4DFD5;
+      --border: rgba(17, 17, 19, 0.10);
+      --border-hover: rgba(17, 17, 19, 0.20);
+      --border-focus: #E53E10;
+      --specular: rgba(255, 255, 255, 0.85);
+      --text: #111113;
+      --text-muted: #666660;
+      --text-dim: #888880;
+      --primary: #E53E10;
+      --primary-hover: #CC350C;
+      --primary-active: #B22C08;
+      --primary-light: rgba(229, 62, 16, 0.10);
+      --primary-glow: rgba(229, 62, 16, 0.25);
+      --secondary-btn-bg: rgba(17, 17, 19, 0.04);
+      --secondary-btn-border: rgba(17, 17, 19, 0.12);
+      --secondary-btn-hover: rgba(17, 17, 19, 0.08);
+      --secondary-btn-text: #111113;
       --success: #059669;
       --success-hover: #047857;
-      --success-light: #ecfdf5;
-      --error: #e11d48;
-      --error-light: #fff1f2;
-      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
-      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-      --shadow-lg: 0 16px 24px -4px rgba(0, 0, 0, 0.08);
-      --mono-font: 'JetBrains Mono', ui-monospace, Menlo, Monaco, Consolas, monospace;
+      --success-light: rgba(5, 150, 105, 0.10);
+      --error: #DC2626;
+      --error-light: rgba(220, 38, 38, 0.10);
+      --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+      --shadow-md: 0 8px 20px -3px rgba(0, 0, 0, 0.08);
+      --shadow-lg: 0 20px 32px -6px rgba(0, 0, 0, 0.10);
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      font-family: var(--font-sans);
     }
 
     body {
       min-height: 100vh;
-      background: var(--bg);
+      background-color: var(--bg);
+      background-image: radial-gradient(var(--dot-color) 1px, transparent 1px);
+      background-size: 24px 24px;
       color: var(--text);
       display: flex;
       flex-direction: column;
       align-items: center;
-      transition: background 0.2s ease, color 0.2s ease;
+      transition: background-color 0.25s ease, color 0.25s ease;
       line-height: 1.5;
+      position: relative;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* Subtle Film Grain Overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 1;
+      opacity: 0.022;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    }
+
+    /* Uniform inline icon styling */
+    .ui-icon {
+      display: inline-block;
+      vertical-align: middle;
+      flex-shrink: 0;
+      stroke: currentColor;
+    }
+    .ui-icon-xs {
+      display: inline-block;
+      vertical-align: -1px;
+      flex-shrink: 0;
+      stroke: currentColor;
     }
 
     /* --- Minimal Top Navigation Bar --- */
     .top-nav {
       width: 100%;
       border-bottom: 1px solid var(--border);
-      background: var(--card-bg);
+      background: rgba(9, 9, 11, 0.85);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
       display: flex;
       justify-content: center;
       position: sticky;
       top: 0;
       z-index: 50;
       transition: background 0.2s, border-color 0.2s;
+    }
+
+    :root[data-theme="light"] .top-nav {
+      background: rgba(245, 243, 238, 0.88);
     }
 
     .top-nav-inner {
@@ -114,8 +173,9 @@
       gap: 10px;
       text-decoration: none;
       color: var(--text);
-      font-weight: 800;
-      font-size: 1.05rem;
+      font-family: var(--font-heading);
+      font-weight: 700;
+      font-size: 1.15rem;
       letter-spacing: -0.02em;
       white-space: nowrap;
       flex-shrink: 0;
@@ -125,27 +185,29 @@
       width: 28px;
       height: 28px;
       border-radius: 7px;
-      background: linear-gradient(135deg, var(--primary), var(--secondary));
+      background: linear-gradient(135deg, #FF4D1C, #E53E10);
       display: flex;
       align-items: center;
       justify-content: center;
       color: #ffffff;
-      font-weight: 900;
+      font-family: var(--font-heading);
+      font-weight: 800;
       font-size: 0.95rem;
-      box-shadow: 0 2px 6px rgba(99, 102, 241, 0.35);
+      box-shadow: 0 2px 10px rgba(255, 77, 28, 0.35);
       flex-shrink: 0;
     }
 
     .brand-badge {
-      font-size: 0.68rem;
-      font-weight: 700;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      font-weight: 600;
       letter-spacing: 0.05em;
       text-transform: uppercase;
-      padding: 2px 7px;
-      border-radius: 5px;
+      padding: 2px 6px;
+      border-radius: 4px;
       background: var(--primary-light);
       color: var(--primary);
-      border: 1px solid rgba(99, 102, 241, 0.25);
+      border: 1px solid rgba(255, 77, 28, 0.25);
     }
 
     .nav-actions {
@@ -171,11 +233,12 @@
       transition: all 0.15s ease;
       white-space: nowrap;
       flex-shrink: 0;
+      box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
     .theme-toggle-btn:hover {
       background: var(--card-hover);
-      border-color: var(--border-focus);
+      border-color: var(--border-hover);
     }
 
     .github-pill {
@@ -193,86 +256,142 @@
       transition: all 0.15s ease;
       white-space: nowrap;
       flex-shrink: 0;
+      box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
     .github-pill:hover {
       background: var(--card-hover);
       color: var(--text);
-      border-color: var(--border-focus);
+      border-color: var(--border-hover);
     }
 
     /* --- Main Container --- */
     .main-wrap {
       width: 100%;
       max-width: 860px;
-      padding: 24px 20px 40px;
+      padding: 28px 20px 48px;
       display: flex;
       flex-direction: column;
       gap: 20px;
+      position: relative;
+      z-index: 2;
     }
 
     .hero-box {
       text-align: center;
-      padding: 10px 0 4px;
+      padding: 10px 0 6px;
+      animation: fadeInUp 0.45s cubic-bezier(0.16, 1, 0.3, 1) backwards;
     }
 
     .hero-title {
-      font-size: 1.6rem;
-      font-weight: 800;
-      letter-spacing: -0.03em;
+      font-family: var(--font-heading);
+      font-size: 1.85rem;
+      font-weight: 750;
+      letter-spacing: -0.035em;
       color: var(--text);
       margin-bottom: 6px;
+      line-height: 1.25;
     }
 
     .hero-subtitle {
-      font-size: 0.88rem;
+      font-size: 0.92rem;
       color: var(--text-muted);
-      font-weight: 500;
+      font-weight: 450;
+      max-width: 620px;
+      margin: 0 auto;
+      line-height: 1.55;
+    }
+
+    .hero-serif-accent {
+      font-family: var(--font-serif);
+      font-style: italic;
+      font-size: 1.1em;
+      color: var(--primary);
     }
 
     /* --- Upload Dropzone --- */
     .dropzone {
-      border: 2px dashed var(--border);
-      border-radius: 12px;
-      background: var(--card-bg);
-      padding: 24px 20px;
+      position: relative;
+      border: 1.5px dashed var(--border);
+      border-radius: 14px;
+      background-color: var(--card-bg);
+      background-image: radial-gradient(400px circle at var(--mx, -999px) var(--my, -999px), rgba(255, 77, 28, 0.05), transparent 70%);
+      padding: 30px 20px;
       text-align: center;
       cursor: pointer;
-      transition: all 0.2s ease;
+      transition: border-color 0.25s ease, background-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      box-shadow: var(--shadow-sm);
+      gap: 10px;
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
+      animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.05s backwards;
+      overflow: hidden;
     }
 
-    .dropzone:hover, .dropzone.dragover {
-      border-color: var(--primary);
-      background: var(--card-subtle);
+    .corner-tick {
+      position: absolute;
+      width: 10px;
+      height: 10px;
+      pointer-events: none;
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.25s ease;
+    }
+    .tick-tl { top: 8px; left: 8px; border-top: 1.5px solid var(--text-dim); border-left: 1.5px solid var(--text-dim); }
+    .tick-tr { top: 8px; right: 8px; border-top: 1.5px solid var(--text-dim); border-right: 1.5px solid var(--text-dim); }
+    .tick-bl { bottom: 8px; left: 8px; border-bottom: 1.5px solid var(--text-dim); border-left: 1.5px solid var(--text-dim); }
+    .tick-br { bottom: 8px; right: 8px; border-bottom: 1.5px solid var(--text-dim); border-right: 1.5px solid var(--text-dim); }
+
+    .dropzone:hover {
+      border-color: rgba(255, 77, 28, 0.4);
+      background-color: var(--card-subtle);
       transform: translateY(-1px);
     }
 
+    .dropzone:hover .corner-tick {
+      border-color: var(--primary);
+    }
+
+    .dropzone.dragover {
+      border-color: #FF4D1C;
+      background-color: var(--card-subtle);
+      box-shadow: 0 0 24px rgba(255, 77, 28, 0.25), inset 0 0 15px rgba(255, 77, 28, 0.08);
+      transform: scale(1.008);
+    }
+
+    .dropzone.dragover .tick-tl { transform: translate(3px, 3px); border-color: #FF4D1C; }
+    .dropzone.dragover .tick-tr { transform: translate(-3px, 3px); border-color: #FF4D1C; }
+    .dropzone.dragover .tick-bl { transform: translate(3px, -3px); border-color: #FF4D1C; }
+    .dropzone.dragover .tick-br { transform: translate(-3px, -3px); border-color: #FF4D1C; }
+
     .dropzone-icon-box {
-      width: 44px;
-      height: 44px;
-      border-radius: 10px;
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
       background: var(--primary-light);
       color: var(--primary);
       display: flex;
       align-items: center;
       justify-content: center;
       margin-bottom: 2px;
+      border: 1px solid rgba(255, 77, 28, 0.2);
+      transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .dropzone:hover .dropzone-icon-box {
+      transform: translateY(-2px);
     }
 
     .dropzone-title {
-      font-size: 0.96rem;
+      font-family: var(--font-heading);
+      font-size: 1.05rem;
       font-weight: 700;
       color: var(--text);
+      letter-spacing: -0.01em;
     }
 
     .dropzone-prompt {
-      font-size: 0.78rem;
+      font-size: 0.80rem;
       color: var(--text-muted);
     }
 
@@ -285,13 +404,15 @@
     }
 
     .format-pill {
+      font-family: var(--font-mono);
       font-size: 0.68rem;
-      font-weight: 700;
+      font-weight: 600;
       padding: 2px 7px;
-      border-radius: 5px;
+      border-radius: 4px;
       background: var(--card-subtle);
       border: 1px solid var(--border);
       color: var(--text-muted);
+      letter-spacing: 0.02em;
     }
 
     .file-input-hidden {
@@ -305,16 +426,17 @@
       gap: 10px;
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 16px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
+      animation: fadeInUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) backwards;
     }
 
     .files-summary {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      font-size: 0.82rem;
+      font-size: 0.84rem;
       font-weight: 700;
       color: var(--text);
     }
@@ -364,6 +486,7 @@
     }
 
     .file-order {
+      font-family: var(--font-mono);
       font-size: 0.72rem;
       font-weight: 700;
       color: var(--primary);
@@ -372,6 +495,7 @@
       border-radius: 4px;
       min-width: 24px;
       text-align: center;
+      border: 1px solid rgba(255, 77, 28, 0.2);
     }
 
     .file-thumb {
@@ -383,10 +507,11 @@
     }
 
     .file-badge {
+      font-family: var(--font-mono);
       font-size: 0.72rem;
-      font-weight: 800;
+      font-weight: 700;
       padding: 3px 7px;
-      border-radius: 5px;
+      border-radius: 4px;
       text-transform: uppercase;
       letter-spacing: 0.03em;
     }
@@ -395,8 +520,8 @@
     .badge-docx, .badge-doc { background: rgba(59, 130, 246, 0.15); color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.3); }
     .badge-xlsx, .badge-xls, .badge-csv { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
     .badge-pptx, .badge-ppt { background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
-    .badge-img { background: rgba(168, 85, 247, 0.15); color: #a855f7; border: 1px solid rgba(168, 85, 247, 0.3); }
-    .badge-txt, .badge-md, .badge-html { background: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.3); }
+    .badge-img, .badge-png, .badge-jpg, .badge-webp { background: rgba(255, 77, 28, 0.15); color: #FF4D1C; border: 1px solid rgba(255, 77, 28, 0.3); }
+    .badge-txt, .badge-md, .badge-html { background: rgba(161, 161, 170, 0.15); color: #A1A1AA; border: 1px solid rgba(161, 161, 170, 0.3); }
 
     .file-meta {
       overflow: hidden;
@@ -414,6 +539,7 @@
     }
 
     .file-size {
+      font-family: var(--font-mono);
       font-size: 0.72rem;
       color: var(--text-dim);
     }
@@ -473,47 +599,56 @@
       font-size: 0.74rem;
       font-weight: 700;
       cursor: pointer;
+      transition: all 0.15s;
     }
 
     .toggle-pill.active {
       background: var(--primary);
       color: #ffffff;
       border-color: var(--primary);
+      box-shadow: 0 0 10px var(--primary-glow);
     }
 
     /* --- Target Format Section --- */
     .target-section {
       background: var(--card-bg);
+      background-image: radial-gradient(400px circle at var(--mx, -999px) var(--my, -999px), rgba(255, 77, 28, 0.04), transparent 70%);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 18px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
+      animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.10s backwards;
     }
 
     .target-section-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 12px;
+      margin-bottom: 14px;
     }
 
     .target-section-title {
-      font-size: 0.8rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 0.85rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--text-muted);
     }
 
     .target-detected-pill {
+      font-family: var(--font-mono);
       font-size: 0.74rem;
-      font-weight: 700;
-      padding: 2px 10px;
+      font-weight: 600;
+      padding: 3px 10px;
       border-radius: 999px;
       background: var(--primary-light);
       color: var(--primary);
-      border: 1px solid rgba(99, 102, 241, 0.25);
+      border: 1px solid rgba(255, 77, 28, 0.3);
       transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .target-detected-pill.muted {
@@ -542,44 +677,53 @@
     }
 
     .category-col-title {
-      font-size: 0.72rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 0.74rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.04em;
       color: var(--text-dim);
       padding-left: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 2px;
     }
 
     .format-btn {
+      position: relative;
       background: var(--card-subtle);
-      border: 1.5px solid var(--border);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 8px 10px;
       font-size: 0.82rem;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--text);
       cursor: pointer;
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 1px;
+      gap: 2px;
       text-align: left;
-      transition: all 0.15s ease;
+      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
     .format-btn span:first-child {
-      font-size: 0.84rem;
-      font-weight: 700;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
     }
 
     .format-btn-sub {
-      font-size: 0.66rem;
+      font-size: 0.68rem;
       font-weight: 500;
       color: var(--text-dim);
     }
 
     .format-btn:hover:not(.active):not(.hidden) {
-      border-color: var(--border-focus);
+      border-color: var(--border-hover);
       background: var(--card-hover);
       transform: translateY(-1px);
     }
@@ -588,7 +732,7 @@
       border-color: var(--primary);
       background: var(--primary-light);
       color: var(--primary);
-      box-shadow: 0 0 0 1px var(--primary);
+      box-shadow: 0 0 12px var(--primary-glow);
     }
 
     .format-btn.active .format-btn-sub {
@@ -604,15 +748,16 @@
       display: none;
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 16px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
       animation: fadeIn 0.2s ease;
     }
 
     .smart-options-header {
-      font-size: 0.78rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 0.80rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--text-muted);
@@ -639,13 +784,14 @@
       align-items: center;
       justify-content: space-between;
       font-size: 0.78rem;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--text-muted);
     }
 
     .opt-val {
+      font-family: var(--font-mono);
       color: var(--primary);
-      font-weight: 800;
+      font-weight: 700;
     }
 
     .dpi-pills {
@@ -656,11 +802,12 @@
     .dpi-pill {
       flex: 1;
       background: var(--card-subtle);
-      border: 1.5px solid var(--border);
+      border: 1px solid var(--border);
       border-radius: 6px;
       padding: 6px 10px;
-      font-size: 0.78rem;
-      font-weight: 700;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      font-weight: 600;
       color: var(--text);
       cursor: pointer;
       text-align: center;
@@ -671,6 +818,7 @@
       border-color: var(--primary);
       background: var(--primary-light);
       color: var(--primary);
+      box-shadow: 0 0 8px var(--primary-glow);
     }
 
     .slider-box {
@@ -690,7 +838,7 @@
     .opt-input {
       width: 100%;
       background: var(--card-subtle);
-      border: 1.5px solid var(--border);
+      border: 1px solid var(--border);
       border-radius: 6px;
       padding: 8px 10px;
       font-size: 0.82rem;
@@ -713,6 +861,7 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
+      animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.15s backwards;
     }
 
     @media (max-width: 600px) {
@@ -724,43 +873,52 @@
     .btn-main, .btn-secondary {
       width: 100%;
       height: 48px;
-      border-radius: 9px;
-      border: none;
+      border-radius: 10px;
       font-size: 0.94rem;
-      font-weight: 700;
+      font-weight: 650;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 8px;
-      transition: all 0.15s ease;
-      box-shadow: var(--shadow-sm);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+      will-change: transform;
     }
 
     .btn-main {
-      background: var(--primary);
+      background: linear-gradient(135deg, #FF4D1C, #E53E10);
       color: #ffffff;
-      box-shadow: 0 4px 10px rgba(99, 102, 241, 0.35);
+      border: none;
+      box-shadow: 0 4px 16px rgba(255, 77, 28, 0.35);
     }
 
     .btn-main:hover:not(:disabled) {
-      background: var(--primary-hover);
-      transform: translateY(-1px);
+      background: linear-gradient(135deg, #FF6236, #FF4D1C);
+      box-shadow: 0 6px 22px rgba(255, 77, 28, 0.45);
+    }
+
+    .btn-main:active:not(:disabled) {
+      transform: scale(0.98) !important;
     }
 
     .btn-secondary {
-      background: var(--secondary);
-      color: #ffffff;
-      box-shadow: 0 4px 10px rgba(2, 132, 199, 0.35);
+      background: var(--secondary-btn-bg);
+      border: 1px solid var(--secondary-btn-border);
+      color: var(--secondary-btn-text);
+      box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
     .btn-secondary:hover:not(:disabled) {
-      background: var(--secondary-hover);
-      transform: translateY(-1px);
+      background: var(--secondary-btn-hover);
+      border-color: var(--border-hover);
+    }
+
+    .btn-secondary:active:not(:disabled) {
+      transform: scale(0.98) !important;
     }
 
     .btn-main:disabled, .btn-secondary:disabled {
-      opacity: 0.45;
+      opacity: 0.40;
       cursor: not-allowed;
       box-shadow: none;
       transform: none;
@@ -775,7 +933,7 @@
     .status-box {
       display: none !important;
       padding: 12px 16px;
-      border-radius: 8px;
+      border-radius: 10px;
       font-size: 0.86rem;
       animation: fadeIn 0.2s ease;
     }
@@ -786,7 +944,7 @@
 
     .status-loading {
       background: var(--primary-light);
-      border: 1px solid var(--primary);
+      border: 1px solid rgba(255, 77, 28, 0.35);
       color: var(--text);
       align-items: center;
       gap: 12px;
@@ -817,13 +975,13 @@
 
     .error-dismiss-btn:hover {
       opacity: 1;
-      background: rgba(244, 63, 94, 0.2);
+      background: rgba(239, 68, 68, 0.2);
     }
 
     .spinner {
       width: 20px;
       height: 20px;
-      border: 2.5px solid rgba(99, 102, 241, 0.3);
+      border: 2px solid rgba(255, 77, 28, 0.25);
       border-top-color: var(--primary);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
@@ -839,14 +997,19 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
     /* --- Inline Editable Preview Workspace --- */
     .edit-workspace {
       display: none;
       background: var(--card-bg);
-      border: 1.5px solid var(--secondary);
-      border-radius: 12px;
+      border: 1.5px solid var(--border-hover);
+      border-radius: 14px;
       padding: 18px;
-      box-shadow: var(--shadow-lg);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-lg);
       animation: fadeIn 0.3s ease;
     }
 
@@ -868,20 +1031,22 @@
     }
 
     .edit-title {
-      font-size: 1rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 1.02rem;
+      font-weight: 700;
       color: var(--text);
     }
 
     .edit-badge {
+      font-family: var(--font-mono);
       font-size: 0.7rem;
       font-weight: 700;
       padding: 2px 7px;
-      border-radius: 5px;
-      background: var(--secondary-light);
-      color: var(--secondary);
+      border-radius: 4px;
+      background: var(--primary-light);
+      color: var(--primary);
       text-transform: uppercase;
-      border: 1px solid rgba(2, 132, 199, 0.3);
+      border: 1px solid rgba(255, 77, 28, 0.3);
     }
 
     .edit-header-actions {
@@ -892,7 +1057,7 @@
 
     .edit-select {
       background: var(--card-subtle);
-      border: 1.5px solid var(--border);
+      border: 1px solid var(--border);
       color: var(--text);
       padding: 6px 10px;
       border-radius: 6px;
@@ -903,7 +1068,7 @@
     }
 
     .edit-export-btn {
-      background: var(--success);
+      background: linear-gradient(135deg, #FF4D1C, #E53E10);
       color: #ffffff;
       border: none;
       border-radius: 6px;
@@ -914,11 +1079,12 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.15s;
     }
 
     .edit-export-btn:hover {
-      background: var(--success-hover);
+      background: linear-gradient(135deg, #FF6236, #FF4D1C);
+      transform: translateY(-1px);
     }
 
     .edit-close-btn {
@@ -930,6 +1096,7 @@
       font-size: 0.8rem;
       font-weight: 700;
       cursor: pointer;
+      transition: all 0.15s;
     }
 
     .edit-close-btn:hover {
@@ -952,19 +1119,26 @@
       color: var(--text-muted);
     }
 
+    .doc-stats {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+
     .doc-textarea {
       width: 100%;
       min-height: 360px;
-      font-family: var(--mono-font);
+      font-family: var(--font-mono);
       font-size: 0.86rem;
       line-height: 1.55;
       padding: 12px;
-      border: 1.5px solid var(--border);
+      border: 1px solid var(--border);
       border-radius: 8px;
       background: var(--card-subtle);
       color: var(--text);
       resize: vertical;
       outline: none;
+      transition: border-color 0.15s;
     }
 
     .doc-textarea:focus {
@@ -981,7 +1155,7 @@
     .table-tabs {
       display: flex;
       gap: 6px;
-      border-bottom: 2px solid var(--border);
+      border-bottom: 1.5px solid var(--border);
       overflow-x: auto;
       padding-bottom: 2px;
     }
@@ -1023,11 +1197,15 @@
       background: var(--card-subtle);
       border: 1px solid var(--border);
       color: var(--text);
-      padding: 4px 9px;
-      border-radius: 5px;
+      padding: 5px 10px;
+      border-radius: 6px;
       font-size: 0.74rem;
       font-weight: 600;
       cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s;
     }
 
     .grid-btn:hover {
@@ -1041,8 +1219,9 @@
     }
 
     .grid-stats {
+      font-family: var(--font-mono);
       font-size: 0.74rem;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--text-dim);
     }
 
@@ -1058,6 +1237,7 @@
       width: 100%;
       border-collapse: collapse;
       font-size: 0.8rem;
+      font-family: var(--font-mono);
     }
 
     .grid-table th {
@@ -1093,7 +1273,7 @@
     }
 
     .grid-table tr.selected-row td {
-      background: rgba(99, 102, 241, 0.2);
+      background: rgba(255, 77, 28, 0.12);
     }
 
     .cell-input {
@@ -1102,6 +1282,7 @@
       border: none;
       padding: 6px 8px;
       font-size: 0.8rem;
+      font-family: var(--font-mono);
       background: transparent;
       outline: none;
       color: var(--text);
@@ -1116,10 +1297,10 @@
     .result-card {
       display: none;
       background: var(--card-bg);
-      border: 1.5px solid var(--success);
-      border-radius: 12px;
+      border: 1.5px solid rgba(16, 185, 129, 0.5);
+      border-radius: 14px;
       padding: 18px;
-      box-shadow: var(--shadow-md);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-md);
       animation: fadeIn 0.3s ease;
       min-width: 0;
       overflow: hidden;
@@ -1152,11 +1333,12 @@
     }
 
     .result-badge {
+      font-family: var(--font-mono);
       background: var(--success-light);
       color: var(--success);
       padding: 3px 8px;
       border-radius: 5px;
-      font-weight: 800;
+      font-weight: 700;
       font-size: 0.74rem;
       text-transform: uppercase;
       border: 1px solid rgba(16, 185, 129, 0.3);
@@ -1176,6 +1358,7 @@
     }
 
     .result-size {
+      font-family: var(--font-mono);
       font-size: 0.74rem;
       color: var(--text-dim);
     }
@@ -1191,7 +1374,7 @@
       background: var(--success);
       color: #ffffff;
       border: none;
-      border-radius: 7px;
+      border-radius: 8px;
       padding: 8px 16px;
       font-size: 0.84rem;
       font-weight: 700;
@@ -1200,31 +1383,34 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      box-shadow: 0 2px 6px rgba(16, 185, 129, 0.3);
-      transition: background 0.15s;
+      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+      transition: background 0.15s, transform 0.15s;
     }
 
     .download-btn:hover {
       background: var(--success-hover);
+      transform: translateY(-1px);
     }
 
     .inspect-btn {
-      background: var(--secondary);
-      color: #ffffff;
-      border: none;
-      border-radius: 7px;
+      background: var(--secondary-btn-bg);
+      border: 1px solid var(--secondary-btn-border);
+      color: var(--secondary-btn-text);
+      border-radius: 8px;
       padding: 8px 14px;
       font-size: 0.84rem;
-      font-weight: 700;
+      font-weight: 650;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      transition: background 0.15s;
+      transition: all 0.15s;
     }
 
     .inspect-btn:hover {
-      background: var(--secondary-hover);
+      background: var(--secondary-btn-hover);
+      border-color: var(--border-hover);
+      transform: translateY(-1px);
     }
 
     .result-viewport {
@@ -1302,6 +1488,7 @@
     }
 
     .pdf-page-label {
+      font-family: var(--font-mono);
       font-size: 0.72rem;
       font-weight: 700;
       color: var(--text-dim);
@@ -1317,7 +1504,7 @@
       max-width: 100%;
       height: auto;
       border-radius: 6px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
       border: 1px solid var(--border);
       background: #ffffff;
       display: block;
@@ -1337,7 +1524,7 @@
 
     .preview-code-wrap {
       padding: 12px;
-      font-family: var(--mono-font);
+      font-family: var(--font-mono);
       font-size: 0.8rem;
       line-height: 1.5;
       max-height: 380px;
@@ -1402,12 +1589,13 @@
     }
 
     .zip-item-meta {
+      font-family: var(--font-mono);
       font-size: 0.68rem;
       color: var(--text-dim);
     }
 
     .zip-text-preview {
-      font-family: var(--mono-font);
+      font-family: var(--font-mono);
       font-size: 0.7rem;
       padding: 6px;
       background: var(--card-subtle);
@@ -1422,12 +1610,12 @@
     .history-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 16px;
       display: none;
       flex-direction: column;
       gap: 10px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
       min-width: 0;
       overflow: hidden;
     }
@@ -1436,8 +1624,9 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      font-size: 0.8rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 0.82rem;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--text-muted);
@@ -1475,7 +1664,7 @@
 
     .history-name {
       font-size: 0.82rem;
-      font-weight: 700;
+      font-weight: 650;
       color: var(--text);
       white-space: nowrap;
       overflow: hidden;
@@ -1486,6 +1675,7 @@
     }
 
     .history-time {
+      font-family: var(--font-mono);
       font-size: 0.7rem;
       color: var(--text-dim);
       flex-shrink: 0;
@@ -1505,11 +1695,12 @@
       padding: 4px 8px;
       border-radius: 5px;
       font-size: 0.74rem;
-      font-weight: 700;
+      font-weight: 650;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
       gap: 4px;
+      transition: all 0.15s;
     }
 
     .hist-btn:hover {
@@ -1556,7 +1747,7 @@
       }
     }
 
-    /* --- Programmatic SEO Section (Below the fold) --- */
+    /* --- Below-The-Fold SEO & Tools Directory --- */
     .seo-section {
       width: 100%;
       border-top: 1px solid var(--border);
@@ -1565,6 +1756,8 @@
       display: flex;
       justify-content: center;
       transition: background 0.2s, border-color 0.2s;
+      position: relative;
+      z-index: 2;
     }
 
     .seo-container {
@@ -1576,8 +1769,9 @@
     }
 
     .seo-breadcrumbs {
+      font-family: var(--font-mono);
       font-size: 0.78rem;
-      font-weight: 600;
+      font-weight: 500;
       color: var(--text-dim);
       display: flex;
       align-items: center;
@@ -1603,23 +1797,25 @@
     .seo-badge {
       display: inline-block;
       align-self: flex-start;
-      font-size: 0.7rem;
-      font-weight: 800;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
       letter-spacing: 0.05em;
       text-transform: uppercase;
       padding: 3px 9px;
-      border-radius: 6px;
+      border-radius: 5px;
       background: var(--primary-light);
       color: var(--primary);
-      border: 1px solid rgba(99, 102, 241, 0.25);
+      border: 1px solid rgba(255, 77, 28, 0.25);
     }
 
     .seo-h2 {
-      font-size: 1.5rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
+      font-family: var(--font-heading);
+      font-size: 1.65rem;
+      font-weight: 750;
+      letter-spacing: -0.025em;
       color: var(--text);
-      line-height: 1.3;
+      line-height: 1.25;
     }
 
     .seo-lead {
@@ -1635,7 +1831,8 @@
     }
 
     .seo-h3 {
-      font-size: 1.05rem;
+      font-family: var(--font-heading);
+      font-size: 1.1rem;
       font-weight: 700;
       letter-spacing: -0.01em;
       color: var(--text);
@@ -1650,26 +1847,27 @@
     .seo-step-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 16px;
       display: flex;
       flex-direction: column;
       gap: 10px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
     }
 
     .seo-step-num {
+      font-family: var(--font-mono);
       width: 28px;
       height: 28px;
       border-radius: 7px;
       background: var(--primary-light);
       color: var(--primary);
       font-weight: 800;
-      font-size: 0.82rem;
+      font-size: 0.80rem;
       display: flex;
       align-items: center;
       justify-content: center;
-      border: 1px solid rgba(99, 102, 241, 0.3);
+      border: 1px solid rgba(255, 77, 28, 0.3);
     }
 
     .seo-step-body {
@@ -1681,9 +1879,9 @@
     .seo-tech-block {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
       padding: 20px;
-      box-shadow: var(--shadow-sm);
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
     }
 
     .seo-tech-text {
@@ -1701,19 +1899,20 @@
     .seo-faq-item {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 9px;
+      border-radius: 10px;
       overflow: hidden;
-      transition: border-color 0.15s;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
     .seo-faq-item[open] {
-      border-color: var(--primary);
+      border-color: rgba(255, 77, 28, 0.4);
     }
 
     .seo-faq-question {
       padding: 14px 18px;
       font-size: 0.88rem;
-      font-weight: 700;
+      font-weight: 650;
       color: var(--text);
       cursor: pointer;
       user-select: none;
@@ -1721,22 +1920,22 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
     }
 
     .seo-faq-question::-webkit-details-marker {
       display: none;
     }
 
-    .seo-faq-question::after {
-      content: '+';
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: var(--primary);
-      transition: transform 0.2s;
+    .faq-chevron {
+      color: var(--text-dim);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      flex-shrink: 0;
     }
 
-    .seo-faq-item[open] .seo-faq-question::after {
-      content: '−';
+    .seo-faq-item[open] .faq-chevron {
+      transform: rotate(180deg);
+      color: var(--primary);
     }
 
     .seo-faq-answer {
@@ -1759,20 +1958,23 @@
       gap: 10px;
       flex-wrap: wrap;
       background: var(--card-subtle);
-      border: 1px dashed var(--border);
+      border: 1px solid var(--border);
       border-radius: 8px;
       padding: 10px 14px;
     }
 
     .seo-reverse-label {
       font-size: 0.8rem;
-      font-weight: 700;
+      font-weight: 650;
       color: var(--text-dim);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
     }
 
     .seo-reverse-link {
       font-size: 0.82rem;
-      font-weight: 700;
+      font-weight: 650;
       color: var(--primary);
       text-decoration: none;
       transition: color 0.15s;
@@ -1789,8 +1991,9 @@
     }
 
     .seo-related-title {
+      font-family: var(--font-heading);
       font-size: 0.78rem;
-      font-weight: 800;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.04em;
       color: var(--text-dim);
@@ -1803,12 +2006,12 @@
     }
 
     .seo-pill-link {
-      background: var(--card-bg);
+      background: var(--card-subtle);
       border: 1px solid var(--border);
       color: var(--text-muted);
       text-decoration: none;
-      font-size: 0.76rem;
-      font-weight: 600;
+      font-size: 0.78rem;
+      font-weight: 550;
       padding: 5px 12px;
       border-radius: 6px;
       transition: all 0.15s ease;
@@ -1816,30 +2019,12 @@
 
     .seo-pill-link:hover {
       border-color: var(--primary);
-      color: var(--primary);
+      color: var(--text);
       background: var(--primary-light);
       transform: translateY(-1px);
     }
 
-    /* Homepage Popular Converters Hub Directory */
-    .seo-header-box {
-      text-align: center;
-      margin-bottom: 8px;
-    }
-
-    .seo-main-title {
-      font-size: 1.35rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      color: var(--text);
-      margin-bottom: 6px;
-    }
-
-    .seo-main-sub {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-    }
-
+    /* Tools Directory Grid */
     .seo-categories-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -1849,37 +2034,77 @@
     .seo-category-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 16px;
-      box-shadow: var(--shadow-sm);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
     }
 
     .seo-cat-title {
-      font-size: 0.82rem;
-      font-weight: 800;
+      font-family: var(--font-heading);
+      font-size: 0.88rem;
+      font-weight: 700;
       color: var(--text);
-      margin-bottom: 12px;
-      padding-bottom: 6px;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
 
     .seo-links-list {
       list-style: none;
       display: flex;
       flex-direction: column;
-      gap: 7px;
+      gap: 6px;
     }
 
     .seo-route-link {
-      font-size: 0.78rem;
-      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
       text-decoration: none;
-      font-weight: 500;
-      transition: color 0.15s ease;
-      display: block;
+      color: var(--text-muted);
+      font-size: 0.80rem;
+      transition: all 0.15s ease;
     }
 
     .seo-route-link:hover {
+      background: var(--card-subtle);
+      color: var(--text);
+      transform: translateX(2px);
+    }
+
+    .seo-tool-pills {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--card-subtle);
+      border: 1px solid var(--border);
+      color: var(--primary);
+      flex-shrink: 0;
+    }
+
+    .seo-tool-title {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .seo-tool-arrow {
+      color: var(--text-dim);
+      transition: transform 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .seo-route-link:hover .seo-tool-arrow {
+      transform: translate(2px, -2px);
       color: var(--primary);
     }
 
@@ -1887,12 +2112,14 @@
     .footer {
       width: 100%;
       border-top: 1px solid var(--border);
-      padding: 20px;
+      padding: 24px 20px;
       text-align: center;
       font-size: 0.8rem;
       color: var(--text-dim);
       margin-top: auto;
       background: var(--card-bg);
+      position: relative;
+      z-index: 2;
     }
 
     .footer a {
@@ -1904,6 +2131,74 @@
 
     .footer a:hover {
       color: var(--primary);
+    }
+
+    .footer-tools-link {
+      color: var(--text) !important;
+      font-weight: 650;
+      text-decoration: underline !important;
+      text-underline-offset: 3px;
+    }
+
+    .footer-tools-link:hover {
+      color: var(--primary) !important;
+    }
+
+    /* --- Custom Spring-Lerp Cursor Follower Halo --- */
+    @media (hover: hover) and (pointer: fine) {
+      .cursor-halo {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        border: 1.5px solid rgba(255, 255, 255, 0.28);
+        pointer-events: none;
+        z-index: 9999;
+        will-change: transform, width, height, border-color, box-shadow;
+        transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    height 0.22s cubic-bezier(0.16, 1, 0.3, 1),
+                    border-color 0.22s ease,
+                    background-color 0.22s ease,
+                    box-shadow 0.22s ease,
+                    opacity 0.2s ease;
+        opacity: 0;
+      }
+      :root[data-theme="light"] .cursor-halo {
+        border-color: rgba(17, 17, 19, 0.25);
+      }
+      .cursor-halo.active {
+        opacity: 1;
+      }
+      .cursor-halo.hovering {
+        width: 44px;
+        height: 44px;
+        border-color: rgba(255, 77, 28, 0.65);
+        background-color: rgba(255, 77, 28, 0.06);
+      }
+      .cursor-halo.dropzone-hover {
+        width: 54px;
+        height: 54px;
+        border-color: #FF4D1C;
+        box-shadow: 0 0 16px rgba(255, 77, 28, 0.5);
+        background-color: rgba(255, 77, 28, 0.08);
+      }
+    }
+    @media (pointer: coarse), (hover: none), (prefers-reduced-motion: reduce) {
+      .cursor-halo {
+        display: none !important;
+      }
+    }
+
+    /* Reduced motion override */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
     }
   </style>
 </head>
@@ -1919,7 +2214,7 @@
       </a>
       <div class="nav-actions">
         <button type="button" class="theme-toggle-btn" id="themeToggleBtn" title="Toggle Dark/Light Mode">
-          <span id="themeToggleIcon">☀️</span>
+          <span id="themeToggleIcon"><svg class="ui-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></span>
           <span id="themeToggleText">Light</span>
         </button>
         <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer" class="github-pill">
@@ -1937,14 +2232,18 @@
 
     <div class="hero-box">
       <h1 class="hero-title">Velmo — Universal Any-to-Any Converter</h1>
-      <p class="hero-subtitle">High-contrast, unrestricted conversion across 11 formats with in-browser editing & local OCR.</p>
+      <p class="hero-subtitle">High-contrast, unrestricted conversion across 11 formats with <span class="hero-serif-accent">in-browser editing</span> &amp; local neural OCR.</p>
     </div>
 
     <!-- Upload Zone -->
     <div class="dropzone" id="dropzone">
+      <div class="corner-tick tick-tl"></div>
+      <div class="corner-tick tick-tr"></div>
+      <div class="corner-tick tick-bl"></div>
+      <div class="corner-tick tick-br"></div>
       <div class="dropzone-icon-box">
-        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+        <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
         </svg>
       </div>
       <div class="dropzone-title">Drop your documents or images here</div>
@@ -1991,7 +2290,10 @@
       <div class="categories-grid">
         <!-- 1. Documents -->
         <div class="category-col">
-          <div class="category-col-title">📄 Documents</div>
+          <div class="category-col-title">
+            <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span>Documents</span>
+          </div>
           <button type="button" class="format-btn" data-fmt="pdf">
             <span>PDF (.pdf)</span>
             <span class="format-btn-sub">Universal Document</span>
@@ -2008,7 +2310,10 @@
 
         <!-- 2. Data -->
         <div class="category-col">
-          <div class="category-col-title">📊 Spreadsheets</div>
+          <div class="category-col-title">
+            <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+            <span>Spreadsheets</span>
+          </div>
           <button type="button" class="format-btn" data-fmt="xlsx">
             <span>Excel (.xlsx)</span>
             <span class="format-btn-sub">Multi-Sheet Table</span>
@@ -2021,7 +2326,10 @@
 
         <!-- 3. Images -->
         <div class="category-col">
-          <div class="category-col-title">🖼️ Images</div>
+          <div class="category-col-title">
+            <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            <span>Images</span>
+          </div>
           <button type="button" class="format-btn" data-fmt="png">
             <span>PNG</span>
             <span class="format-btn-sub">High Resolution</span>
@@ -2038,7 +2346,10 @@
 
         <!-- 4. Text & Web -->
         <div class="category-col">
-          <div class="category-col-title">🌐 Text & Markup</div>
+          <div class="category-col-title">
+            <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>Text &amp; Markup</span>
+          </div>
           <button type="button" class="format-btn" data-fmt="md">
             <span>Markdown (.md)</span>
             <span class="format-btn-sub">Clean Markdown</span>
@@ -2057,7 +2368,10 @@
 
     <!-- Smart Conversion Options (Conditional) -->
     <div class="smart-options" id="smartOptions">
-      <div class="smart-options-header">⚙️ Conversion Settings</div>
+      <div class="smart-options-header">
+        <svg class="ui-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Conversion Settings</span>
+      </div>
       <div class="smart-options-grid">
         <!-- DPI Selector -->
         <div class="opt-row" id="dpiOptionRow">
@@ -2099,17 +2413,17 @@
     <!-- Action Buttons (Prominent Side-by-Side) -->
     <div class="action-group">
       <button type="button" class="btn-main" id="convertBtn" disabled title="Upload at least one file to convert">
-        <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
         </svg>
         <span id="btnLabel">Convert Document</span>
       </button>
 
       <button type="button" class="btn-secondary" id="editPreviewBtn" disabled title="Upload at least one file to preview & edit">
-        <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+        <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
         </svg>
-        <span>Preview & Edit</span>
+        <span>Preview &amp; Edit</span>
       </button>
     </div>
 
@@ -2128,7 +2442,8 @@
     <div class="edit-workspace" id="editWorkspace">
       <div class="edit-header">
         <div class="edit-title-group">
-          <span class="edit-title">✏️ In-Browser Preview & Editor</span>
+          <svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          <span class="edit-title">In-Browser Preview &amp; Editor</span>
           <span class="edit-badge" id="editModeBadge">Markdown</span>
         </div>
         <div class="edit-header-actions">
@@ -2147,8 +2462,8 @@
             <option value="html">HTML (.html)</option>
           </select>
           <button type="button" class="edit-export-btn" id="exportEditedBtn">
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
             Export File
           </button>
@@ -2159,7 +2474,10 @@
       <!-- Document Mode View -->
       <div class="doc-editor" id="docEditorContainer">
         <div class="doc-toolbar">
-          <span>💡 Edit Markdown copy directly. Headings (#, ##), tables, and lists will export cleanly.</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px;">
+            <svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            Edit Markdown copy directly. Headings (#, ##), tables, and lists will export cleanly.
+          </span>
           <span class="doc-stats" id="docEditStats">0 words • 0 characters</span>
         </div>
         <textarea id="docEditTextarea" class="doc-textarea" placeholder="Extracted document text will appear here..." spellcheck="false"></textarea>
@@ -2170,9 +2488,18 @@
         <div class="table-tabs" id="tableSheetTabs"></div>
         <div class="grid-toolbar">
           <div class="grid-btn-group">
-            <button type="button" class="grid-btn" id="addRowBtn">➕ Add Row</button>
-            <button type="button" class="grid-btn" id="addColBtn">➕ Add Column</button>
-            <button type="button" class="grid-btn grid-btn-del" id="delRowBtn">➖ Delete Selected Row</button>
+            <button type="button" class="grid-btn" id="addRowBtn">
+              <svg class="ui-icon-xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Row
+            </button>
+            <button type="button" class="grid-btn" id="addColBtn">
+              <svg class="ui-icon-xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Column
+            </button>
+            <button type="button" class="grid-btn grid-btn-del" id="delRowBtn">
+              <svg class="ui-icon-xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Delete Selected Row
+            </button>
           </div>
           <span class="grid-stats" id="tableStats">0 rows × 0 cols</span>
         </div>
@@ -2194,15 +2521,15 @@
         </div>
         <div class="result-btn-group">
           <button type="button" class="inspect-btn" id="inspectResultBtn" style="display: none;">
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
             </svg>
             Inspect / Edit
           </button>
           <a class="download-btn" id="downloadBtn" download="converted">
-            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
             Download
           </a>
@@ -2214,7 +2541,10 @@
     <!-- Session History -->
     <div class="history-card" id="historySection">
       <div class="history-header">
-        <span>🕒 Recent Conversions (<span id="historyCount">0</span>)</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px;">
+          <svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Recent Conversions (<span id="historyCount">0</span>)
+        </span>
         <button type="button" class="clear-btn" id="clearHistoryBtn">Clear History</button>
       </div>
       <div class="history-list" id="historyList"></div>
@@ -2224,10 +2554,14 @@
 
   <!-- Clean Footer (No Library Spam, Full Creator Credit) -->
   <footer class="footer">
-    Built by Shintouwa • <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer">GitHub ↗</a> &nbsp;•&nbsp; No login required • Unlimited conversions
+    Built by Shintouwa &bull; <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer">GitHub ↗</a> &bull; <a href="/tools" class="footer-tools-link">All 28 Converters ↗</a> &bull; No login required &bull; Unlimited conversions
   </footer>
 
+  <!-- Cursor Halo Follower Element -->
+  <div id="cursorHalo" class="cursor-halo" aria-hidden="true"></div>
+
   <script>
+
     // --- State Management ---
     let selectedFiles = []; // File objects
     let detectedFormat = null;
@@ -2332,10 +2666,12 @@
       document.documentElement.setAttribute('data-theme', theme);
       localStorage.setItem('velmo_theme', theme);
       if (theme === 'dark') {
-        themeToggleIcon.textContent = '☀️';
+        themeToggleIcon.innerHTML = `<svg class="ui-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>`;
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#09090B');
         themeToggleText.textContent = 'Light';
       } else {
-        themeToggleIcon.textContent = '🌙';
+        themeToggleIcon.innerHTML = `<svg class="ui-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`;
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', '#F5F3EE');
         themeToggleText.textContent = 'Dark';
       }
     }
@@ -2595,7 +2931,7 @@
       }
       detectedFormatInfo.classList.remove('muted');
       if (isBatchMode()) {
-        detectedFormatInfo.textContent = `⚡ Batch Mode (${selectedFiles.length} Files Queued)`;
+        detectedFormatInfo.innerHTML = `<svg class="ui-icon-xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Batch Mode (${selectedFiles.length} Files Queued)`;
       } else if (selectedFiles.length > 1 && areAllImages()) {
         detectedFormatInfo.textContent = `Input: ${selectedFiles.length} Images (Merge)`;
       } else if (detectedFormat === 'mixed') {
@@ -3160,7 +3496,7 @@
 
         let pagesHtml = `
           <div class="pdf-viewer-header">
-            <span>📄 Document Preview • ${total} Page${total !== 1 ? 's' : ''}</span>
+            <span><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg> Document Preview • ${total} Page${total !== 1 ? 's' : ''}</span>
           </div>
           <div class="pdf-viewer-scroll">
         `;
@@ -3188,7 +3524,7 @@
         console.warn('PDF preview error:', err);
         container.innerHTML = `
           <div style="padding: 24px 16px; text-align: center;">
-            <div style="font-size: 2rem; margin-bottom: 8px;">📄</div>
+            <div style="margin-bottom: 12px; display: flex; justify-content: center;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
             <div style="font-weight: 700; font-size: 0.95rem; margin-bottom: 4px; color: var(--text);">PDF Document Ready</div>
             <p style="font-size: 0.8rem; color: var(--text-dim); margin: 0 auto 12px; max-width: 320px;">
               Your PDF is ready. Click Download to save the document.
@@ -3202,7 +3538,7 @@
     async function renderZipInspector(blob, zipFilename) {
       const container = document.createElement('div');
       container.className = 'zip-gallery';
-      container.innerHTML = `<div class="zip-summary-bar"><span>📦 Inspecting archive: ${zipFilename}...</span></div>`;
+      container.innerHTML = `<div class="zip-summary-bar"><span><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg> Inspecting archive: ${zipFilename}...</span></div>`;
       previewViewport.appendChild(container);
 
       try {
@@ -3214,7 +3550,7 @@
 
         container.innerHTML = `
           <div class="zip-summary-bar">
-            <span>📦 Archive contents (${data.total_files} file${data.total_files > 1 ? 's' : ''})</span>
+            <span><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg> Archive contents (${data.total_files} file${data.total_files > 1 ? 's' : ''})</span>
             <span>Click any image to enlarge</span>
           </div>
           <div class="zip-grid" id="zipGrid"></div>
@@ -3243,7 +3579,7 @@
             `;
           } else {
             card.innerHTML = `
-              <div style="font-size: 2rem; text-align: center; padding: 20px 0;">📄</div>
+              <div style="text-align: center; padding: 20px 0; display: flex; justify-content: center;"><svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
               <div class="zip-item-name" title="${entry.name}">${entry.name}</div>
               <div class="zip-item-meta">${formatBytes(entry.size)} • ${entry.ext.toUpperCase()}</div>
             `;
@@ -3254,7 +3590,7 @@
       } catch (e) {
         container.innerHTML = `
           <div class="zip-summary-bar">
-            <span>📦 Batch Archive Ready (${zipFilename})</span>
+            <span><svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg> Batch Archive Ready (${zipFilename})</span>
           </div>
           <div style="padding: 14px; font-size: 0.85rem; color: var(--text-muted);">
             All converted files are neatly bundled and ready to download.
@@ -3266,7 +3602,7 @@
     function renderFallbackNotice(fmt, name) {
       previewViewport.innerHTML = `
         <div style="padding: 24px 20px; text-align: center;">
-          <div style="font-size: 2rem; margin-bottom: 8px;">📄</div>
+          <div style="margin-bottom: 12px; display: flex; justify-content: center;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></div>
           <strong style="color: var(--text);">${name}</strong>
           <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 4px;">
             Ready to download or click "Inspect / Edit Content" above to review inside the browser.
@@ -3338,8 +3674,8 @@
             </div>
           </div>
           <div class="history-btn-group">
-            <button type="button" class="hist-btn preview-hist-btn">👁️ Preview</button>
-            <a class="hist-btn" href="${item.url}" download="${item.filename}">📥 Download</a>
+            <button type="button" class="hist-btn preview-hist-btn"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Preview</button>
+            <a class="hist-btn" href="${item.url}" download="${item.filename}"><svg class="ui-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</a>
           </div>
         `;
 
@@ -3373,7 +3709,7 @@
       if (preselectTo) {
         const detectedInfo = document.getElementById('detectedFormatInfo');
         if (detectedInfo && preselectFrom) {
-          detectedInfo.textContent = `🎯 Ready: ${preselectFrom.toUpperCase()} → ${preselectTo.toUpperCase()}`;
+          detectedInfo.innerHTML = `<svg class="ui-icon-xs" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/></svg> Ready: ${preselectFrom.toUpperCase()} &rarr; ${preselectTo.toUpperCase()}`;
           detectedInfo.classList.remove('muted');
         }
       }
@@ -3385,6 +3721,100 @@
     updateTargetButtons();
     updateActionButtons();
     hydrateSeoRouteState();
+  
+
+    // --- Mouse Cursor Halo, Specular Spotlight & Magnetic Physics ---
+    (function initInteractions() {
+      const isFinePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const halo = document.getElementById('cursorHalo');
+
+      // 1. Spring-Lerp Cursor Follower Halo
+      if (isFinePointer && !prefersReducedMotion && halo) {
+        let mouseX = -100, mouseY = -100;
+        let haloX = -100, haloY = -100;
+        let isVisible = false;
+
+        window.addEventListener('mousemove', (e) => {
+          mouseX = e.clientX;
+          mouseY = e.clientY;
+          if (!isVisible) {
+            isVisible = true;
+            halo.classList.add('active');
+          }
+        }, { passive: true });
+
+        document.addEventListener('mouseleave', () => {
+          isVisible = false;
+          halo.classList.remove('active');
+        });
+
+        function renderHalo() {
+          if (isVisible) {
+            haloX += (mouseX - haloX) * 0.18;
+            haloY += (mouseY - haloY) * 0.18;
+            halo.style.transform = `translate3d(${haloX}px, ${haloY}px, 0) translate(-50%, -50%)`;
+          }
+          requestAnimationFrame(renderHalo);
+        }
+        requestAnimationFrame(renderHalo);
+
+        // Hover expansions
+        const interactiveSelector = 'button, a, .format-btn, .dpi-pill, .toggle-pill, input, select, textarea, .seo-route-link, .seo-pill-link, .seo-faq-question';
+        document.addEventListener('mouseover', (e) => {
+          if (e.target.closest('#dropzone')) {
+            halo.classList.add('dropzone-hover');
+          } else if (e.target.closest(interactiveSelector)) {
+            halo.classList.add('hovering');
+          }
+        }, { passive: true });
+
+        document.addEventListener('mouseout', (e) => {
+          if (e.target.closest('#dropzone')) {
+            halo.classList.remove('dropzone-hover');
+          }
+          if (e.target.closest(interactiveSelector)) {
+            halo.classList.remove('hovering');
+          }
+        }, { passive: true });
+      }
+
+      // 2. Cursor-Tracking Specular Spotlight (--mx, --my)
+      if (isFinePointer && !prefersReducedMotion) {
+        document.addEventListener('mousemove', (e) => {
+          const target = e.target.closest('.dropzone, .target-section, .format-btn, .smart-options, .edit-workspace, .result-card, .history-card, .seo-category-card, .seo-step-card, .seo-tech-block, .seo-faq-item');
+          if (target) {
+            const rect = target.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            target.style.setProperty('--mx', `${x}px`);
+            target.style.setProperty('--my', `${y}px`);
+          }
+        }, { passive: true });
+
+        // 3. Magnetic Buttons (max 4px translation)
+        const magneticElements = [
+          document.getElementById('convertBtn'),
+          document.getElementById('editPreviewBtn')
+        ].filter(Boolean);
+
+        magneticElements.forEach(btn => {
+          btn.addEventListener('mousemove', (e) => {
+            if (btn.disabled) return;
+            const rect = btn.getBoundingClientRect();
+            const x = e.clientX - rect.left - rect.width / 2;
+            const y = e.clientY - rect.top - rect.height / 2;
+            const pullX = Math.max(-4, Math.min(4, x * 0.15));
+            const pullY = Math.max(-4, Math.min(4, y * 0.15));
+            btn.style.transform = `translate3d(${pullX}px, ${pullY}px, 0)`;
+          });
+          btn.addEventListener('mouseleave', () => {
+            btn.style.transform = 'translate3d(0, 0, 0)';
+          });
+        });
+      }
+    })();
+
   </script>
 </body>
 </html>
