@@ -59,7 +59,7 @@ async def get_index():
     return Response(
         content=rendered_html,
         media_type="text/html",
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+        headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
 
@@ -78,7 +78,7 @@ async def get_tools_directory():
     return Response(
         content=rendered_html,
         media_type="text/html",
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+        headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
 
@@ -124,7 +124,7 @@ async def get_og_image():
     return Response(
         content=png_bytes,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=604800"},
     )
 
 
@@ -622,7 +622,7 @@ async def get_seo_landing_page(route_slug: str):
     return Response(
         content=rendered_html,
         media_type="text/html",
-        headers={"Cache-Control": "public, max-age=3600, stale-while-revalidate=86400"},
+        headers={"Cache-Control": "no-cache, must-revalidate"},
     )
 
 
