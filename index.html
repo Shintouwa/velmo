@@ -41,10 +41,21 @@
       --primary-active: #E03E10;
       --primary-light: rgba(255, 77, 28, 0.12);
       --primary-glow: rgba(255, 77, 28, 0.35);
-      --secondary-btn-bg: rgba(255, 255, 255, 0.05);
-      --secondary-btn-border: rgba(255, 255, 255, 0.12);
-      --secondary-btn-hover: rgba(255, 255, 255, 0.10);
+      --secondary-btn-bg: #17171B;
+      --secondary-btn-border: #2C2C34;
+      --secondary-btn-hover: #1E1E24;
+      --secondary-btn-active: #131316;
       --secondary-btn-text: #FAFAFA;
+      --secondary-btn-disabled-bg: #151518;
+      --secondary-btn-disabled-text: #52525B;
+      --secondary-btn-disabled-border: #232328;
+      --main-btn-bg: linear-gradient(135deg, #FF4D1C, #E53E10);
+      --main-btn-hover: linear-gradient(135deg, #FF6236, #FF4D1C);
+      --main-btn-active: linear-gradient(135deg, #E03E10, #C9330B);
+      --main-btn-text: #ffffff;
+      --main-btn-disabled-bg: #2E201C;
+      --main-btn-disabled-text: #7A574E;
+      --main-btn-disabled-border: #3D2924;
       --success: #10B981;
       --success-hover: #059669;
       --success-light: rgba(16, 185, 129, 0.12);
@@ -73,10 +84,21 @@
       --primary-active: #B22C08;
       --primary-light: rgba(229, 62, 16, 0.10);
       --primary-glow: rgba(229, 62, 16, 0.25);
-      --secondary-btn-bg: rgba(17, 17, 19, 0.04);
-      --secondary-btn-border: rgba(17, 17, 19, 0.12);
-      --secondary-btn-hover: rgba(17, 17, 19, 0.08);
+      --secondary-btn-bg: #ECE8E1;
+      --secondary-btn-border: #D8D3C8;
+      --secondary-btn-hover: #E4DFD5;
+      --secondary-btn-active: #DBD5C9;
       --secondary-btn-text: #111113;
+      --secondary-btn-disabled-bg: #E8E5DF;
+      --secondary-btn-disabled-text: #9E9B94;
+      --secondary-btn-disabled-border: #DBD7CE;
+      --main-btn-bg: linear-gradient(135deg, #E53E10, #CC350C);
+      --main-btn-hover: linear-gradient(135deg, #FF4D1C, #E53E10);
+      --main-btn-active: linear-gradient(135deg, #B22C08, #992305);
+      --main-btn-text: #ffffff;
+      --main-btn-disabled-bg: #F0DDD6;
+      --main-btn-disabled-text: #BA8577;
+      --main-btn-disabled-border: #E5C5BC;
       --success: #059669;
       --success-hover: #047857;
       --success-light: rgba(5, 150, 105, 0.10);
@@ -148,10 +170,10 @@
     }
 
     /* --- Minimal Top Navigation Bar --- */
-    .top-nav {
+    header, nav, .top-nav {
       width: 100%;
       border-bottom: 1px solid var(--border);
-      background: rgba(9, 9, 11, 0.85);
+      background: #09090B;
       backdrop-filter: blur(14px);
       -webkit-backdrop-filter: blur(14px);
       display: flex;
@@ -162,8 +184,38 @@
       transition: background 0.2s, border-color 0.2s;
     }
 
+    :root[data-theme="light"] header,
+    :root[data-theme="light"] nav,
     :root[data-theme="light"] .top-nav {
-      background: rgba(245, 243, 238, 0.88);
+      background: #F5F3EE;
+    }
+
+    /* Higher Stacking Context for Header/Nav, Main, Footer, Cards and Buttons */
+    header, nav, .top-nav,
+    main, .main-wrap,
+    footer, .footer,
+    .dropzone,
+    .target-section,
+    .result-card,
+    .edit-workspace,
+    .history-card,
+    .history-section,
+    #historySection,
+    .files-container,
+    .smart-options,
+    .action-group,
+    .btn-main,
+    .btn-secondary,
+    #convertBtn,
+    #editPreviewBtn {
+      position: relative;
+      z-index: 2;
+    }
+
+    header, nav, .top-nav {
+      position: sticky;
+      top: 0;
+      z-index: 50;
     }
 
     .top-nav-inner {
@@ -275,7 +327,7 @@
     }
 
     /* --- Main Container --- */
-    .main-wrap {
+    main, .main-wrap {
       width: 100%;
       max-width: 860px;
       padding: 28px 20px 48px;
@@ -321,6 +373,7 @@
     /* --- Upload Dropzone --- */
     .dropzone {
       position: relative;
+      z-index: 2;
       border: 1.5px dashed var(--border);
       border-radius: 14px;
       background-color: var(--card-bg);
@@ -433,7 +486,9 @@
       display: none;
       flex-direction: column;
       gap: 10px;
-      background: var(--card-bg);
+      position: relative;
+      z-index: 2;
+      background-color: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 16px;
@@ -620,7 +675,9 @@
 
     /* --- Target Format Section --- */
     .target-section {
-      background: var(--card-bg);
+      position: relative;
+      z-index: 2;
+      background-color: var(--card-bg);
       background-image: radial-gradient(400px circle at var(--mx, -999px) var(--my, -999px), rgba(255, 77, 28, 0.04), transparent 70%);
       border: 1px solid var(--border);
       border-radius: 14px;
@@ -755,7 +812,9 @@
     /* --- Smart Conversion Options --- */
     .smart-options {
       display: none;
-      background: var(--card-bg);
+      position: relative;
+      z-index: 2;
+      background-color: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 16px;
@@ -870,6 +929,8 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
+      position: relative;
+      z-index: 2;
       animation: fadeInUp 0.5s cubic-bezier(0.16, 1, 0.3, 1) 0.15s backwards;
     }
 
@@ -879,7 +940,9 @@
       }
     }
 
-    .btn-main, .btn-secondary {
+    .btn-main, .btn-secondary, #convertBtn, #editPreviewBtn {
+      position: relative;
+      z-index: 2;
       width: 100%;
       height: 48px;
       border-radius: 10px;
@@ -890,47 +953,64 @@
       align-items: center;
       justify-content: center;
       gap: 8px;
-      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+      opacity: 1;
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease, color 0.2s ease;
       will-change: transform;
     }
 
-    .btn-main {
-      background: linear-gradient(135deg, #FF4D1C, #E53E10);
-      color: #ffffff;
-      border: none;
+    .btn-main, #convertBtn {
+      background: var(--main-btn-bg);
+      color: var(--main-btn-text);
+      border: 1px solid transparent;
       box-shadow: 0 4px 16px rgba(255, 77, 28, 0.35);
     }
 
-    .btn-main:hover:not(:disabled) {
-      background: linear-gradient(135deg, #FF6236, #FF4D1C);
+    .btn-main:hover:not(:disabled), #convertBtn:hover:not(:disabled) {
+      background: var(--main-btn-hover);
       box-shadow: 0 6px 22px rgba(255, 77, 28, 0.45);
     }
 
-    .btn-main:active:not(:disabled) {
+    .btn-main:active:not(:disabled), #convertBtn:active:not(:disabled) {
+      background: var(--main-btn-active);
       transform: scale(0.98) !important;
     }
 
-    .btn-secondary {
+    .btn-secondary, #editPreviewBtn {
       background: var(--secondary-btn-bg);
       border: 1px solid var(--secondary-btn-border);
       color: var(--secondary-btn-text);
       box-shadow: inset 0 1px 0 0 var(--specular);
     }
 
-    .btn-secondary:hover:not(:disabled) {
+    .btn-secondary:hover:not(:disabled), #editPreviewBtn:hover:not(:disabled) {
       background: var(--secondary-btn-hover);
       border-color: var(--border-hover);
     }
 
-    .btn-secondary:active:not(:disabled) {
+    .btn-secondary:active:not(:disabled), #editPreviewBtn:active:not(:disabled) {
+      background: var(--secondary-btn-active);
       transform: scale(0.98) !important;
     }
 
-    .btn-main:disabled, .btn-secondary:disabled {
-      opacity: 0.40;
+    .btn-main:disabled, #convertBtn:disabled {
+      background: var(--main-btn-disabled-bg) !important;
+      color: var(--main-btn-disabled-text) !important;
+      border: 1px solid var(--main-btn-disabled-border) !important;
+      opacity: 1 !important;
       cursor: not-allowed;
-      box-shadow: none;
-      transform: none;
+      box-shadow: none !important;
+      transform: none !important;
+      pointer-events: auto;
+    }
+
+    .btn-secondary:disabled, #editPreviewBtn:disabled {
+      background: var(--secondary-btn-disabled-bg) !important;
+      color: var(--secondary-btn-disabled-text) !important;
+      border: 1px solid var(--secondary-btn-disabled-border) !important;
+      opacity: 1 !important;
+      cursor: not-allowed;
+      box-shadow: none !important;
+      transform: none !important;
       pointer-events: auto;
     }
 
@@ -1014,7 +1094,9 @@
     /* --- Inline Editable Preview Workspace --- */
     .edit-workspace {
       display: none;
-      background: var(--card-bg);
+      position: relative;
+      z-index: 2;
+      background-color: var(--card-bg);
       border: 1.5px solid var(--border-hover);
       border-radius: 14px;
       padding: 18px;
@@ -1305,7 +1387,9 @@
     /* --- Result Card --- */
     .result-card {
       display: none;
-      background: var(--card-bg);
+      position: relative;
+      z-index: 2;
+      background-color: var(--card-bg);
       border: 1.5px solid rgba(16, 185, 129, 0.5);
       border-radius: 14px;
       padding: 18px;
@@ -1616,12 +1700,14 @@
     }
 
     /* --- Session History --- */
-    .history-card {
-      background: var(--card-bg);
+    .history-card, .history-section, #historySection {
+      background-color: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 16px;
       display: none;
+      position: relative;
+      z-index: 2;
       flex-direction: column;
       gap: 10px;
       box-shadow: inset 0 1px 0 0 var(--specular), var(--shadow-sm);
@@ -2118,7 +2204,7 @@
     }
 
     /* --- Footer --- */
-    .footer {
+    footer, .footer {
       width: 100%;
       border-top: 1px solid var(--border);
       padding: 24px 20px;
@@ -2126,7 +2212,7 @@
       font-size: 0.8rem;
       color: var(--text-dim);
       margin-top: auto;
-      background: var(--card-bg);
+      background-color: var(--card-bg);
       position: relative;
       z-index: 2;
     }
