@@ -43,10 +43,19 @@ from bs4 import BeautifulSoup
 from pdf2docx import Converter
 
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    Image as RLImage,
+    NextPageTemplate,
     PageBreak,
+    PageTemplate,
     Paragraph as RLParagraph,
     SimpleDocTemplate,
     Spacer,
@@ -643,18 +652,36 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
     table_index = 0
     last_heading_text: Optional[str] = None
     document_paragraphs = []
+    list_counters: Dict[Tuple[str, int], int] = {}
 
     for child in doc.element.body.iterchildren():
         if child.tag.endswith('p'):
-            p = Paragraph(child, doc)
-            text = p.text.strip()
+            p_info = _extract_oxml_paragraph_data(child, doc)
+            text = p_info["plain_text"].strip()
             if not text:
                 continue
+            p = Paragraph(child, doc)
+            style_name = p.style.name if p.style else "Normal"
+            hl = p_info["heading_level"]
             is_heading = (
-                p.style.name.startswith("Heading") or
-                (any(r.bold for r in p.runs) and len(text) < 80)
+                hl > 0
+                or style_name.startswith("Heading")
+                or (any(s.get("bold") for s in p_info["segments"]) and len(text) < 80 and not p_info["list_info"] and not p_info["is_callout"])
             )
-            document_paragraphs.append((p.style.name, text, is_heading))
+            display_text = text
+            if p_info["list_info"] is not None:
+                li = p_info["list_info"]
+                ilvl = li["ilvl"]
+                indent = "  " * ilvl
+                if li["ordered"]:
+                    key = (li["num_id"], ilvl)
+                    list_counters[key] = list_counters.get(key, 0) + 1
+                    display_text = f"{indent}{list_counters[key]}. {text}"
+                else:
+                    bullet = "•" if ilvl == 0 else ("◦" if ilvl == 1 else "▪")
+                    display_text = f"{indent}{bullet} {text}"
+
+            document_paragraphs.append((style_name, display_text, is_heading))
             if is_heading:
                 last_heading_text = text
 
@@ -666,28 +693,42 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
             last_heading_text = None
 
             ws = wb.create_sheet(title=sheet_title)
-            for r_idx, row in enumerate(table.rows, start=1):
-                is_header_row = (r_idx == 1)
-                for c_idx, cell in enumerate(row.cells, start=1):
-                    c_text = cell.text.strip()
-                    parsed_val = parse_numeric(c_text)
-                    excel_cell = ws.cell(row=r_idx, column=c_idx, value=parsed_val)
-                    excel_cell.border = thin_border
+            raw_rows, span_cmds, repeat_hdr_rows, _ = _extract_docx_table_grid_and_spans(table, doc)
 
-                    is_cell_bold = is_header_row or any(run.bold for p in cell.paragraphs for run in p.runs)
-                    if is_cell_bold:
-                        excel_cell.font = Font(bold=True)
+            for r_idx, row in enumerate(raw_rows, start=1):
+                is_header_row = (r_idx <= max(repeat_hdr_rows, 1))
+                for c_idx, cell in enumerate(row, start=1):
+                    excel_cell = ws.cell(row=r_idx, column=c_idx)
+                    excel_cell.border = thin_border
+                    if not cell or not cell["is_origin"]:
+                        continue
+
+                    c_text = "\n".join(
+                        p["plain_text"].strip() for p in cell["paras"] if p["plain_text"].strip()
+                    ).strip()
+                    parsed_val = parse_numeric(c_text)
+                    excel_cell.value = parsed_val
+
+                    fill_hex = cell.get("fill")
+                    is_cell_bold = is_header_row or any(
+                        s.get("bold") for p in cell["paras"] for s in p["segments"]
+                    )
+                    if fill_hex and fill_hex not in ("FFFFFF", "AUTO"):
+                        excel_cell.fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type="solid")
+                        if _is_dark_hex(fill_hex):
+                            excel_cell.font = Font(bold=is_cell_bold, color="FFFFFF")
+                        elif is_cell_bold:
+                            excel_cell.font = Font(bold=True)
+                    else:
+                        if is_cell_bold:
+                            excel_cell.font = Font(bold=True)
                         if is_header_row:
                             excel_cell.fill = header_fill
 
-            for col in ws.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                for c in col:
-                    if c.value is not None:
-                        lines = str(c.value).split("\n")
-                        max_len = max(max_len, max(len(l) for l in lines))
-                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+            for c0, r0, c1, r1 in span_cmds:
+                ws.merge_cells(start_row=r0 + 1, start_column=c0 + 1, end_row=r1 + 1, end_column=c1 + 1)
+
+            _auto_fit_xlsx_columns(ws)
 
     text_sheet_title = sanitize_sheet_title("Document Text", used_sheet_titles)
     ws_text = wb.create_sheet(title=text_sheet_title, index=0)
@@ -713,20 +754,14 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
         c1.border = thin_border
         c2.border = thin_border
 
-    for col in ws_text.columns:
-        max_len = 0
-        col_letter = get_column_letter(col[0].column)
-        for c in col:
-            if c.value is not None:
-                lines = str(c.value).split("\n")
-                max_len = max(max_len, max(len(l) for l in lines))
-        ws_text.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 65)
+    _auto_fit_xlsx_columns(ws_text, min_width=12, max_width=65)
 
     if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
         wb.remove(default_sheet)
 
     out_io = io.BytesIO()
     wb.save(out_io)
+    wb.close()
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_index
 
 
@@ -1265,6 +1300,620 @@ def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
         _release_pdf_memory()
 
 
+_REPORTLAB_FONTS_INITIALIZED = False
+_REPORTLAB_SANS_FAMILY = "Helvetica"
+_REPORTLAB_MONO_FAMILY = "Courier"
+
+
+def _ensure_reportlab_unicode_fonts() -> Tuple[str, str]:
+    """
+    Registers bundled DejaVu Sans / DejaVu Sans Mono TrueType fonts (with OS fallback)
+    so ReportLab renders ₹, €, £, —, ±, α, β, μ, ≤, ≥, °C, Ω cleanly without tofu boxes.
+    Returns: (sans_family, mono_family)
+    """
+    global _REPORTLAB_FONTS_INITIALIZED, _REPORTLAB_SANS_FAMILY, _REPORTLAB_MONO_FAMILY
+    if _REPORTLAB_FONTS_INITIALIZED:
+        return _REPORTLAB_SANS_FAMILY, _REPORTLAB_MONO_FAMILY
+
+    base_dir = Path(__file__).resolve().parent
+    candidate_dirs = [
+        base_dir / "fonts",
+        Path("/usr/share/fonts/truetype/dejavu"),
+        Path("/usr/share/fonts/truetype/liberation"),
+        Path("C:/Windows/Fonts"),
+    ]
+
+    sans_specs = [
+        ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "DejaVuSans-Oblique.ttf", "DejaVuSans-BoldOblique.ttf"),
+        ("LiberationSans-Regular.ttf", "LiberationSans-Bold.ttf", "LiberationSans-Italic.ttf", "LiberationSans-BoldItalic.ttf"),
+        ("arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf"),
+    ]
+    mono_specs = [
+        ("DejaVuSansMono.ttf", "DejaVuSansMono-Bold.ttf"),
+        ("LiberationMono-Regular.ttf", "LiberationMono-Bold.ttf"),
+        ("consola.ttf", "consolab.ttf"),
+    ]
+
+    for d in candidate_dirs:
+        if not d.is_dir():
+            continue
+        for reg, bld, ita, bld_ita in sans_specs:
+            p_reg = d / reg
+            if p_reg.is_file():
+                try:
+                    p_bld = d / bld if (d / bld).is_file() else p_reg
+                    p_ita = d / ita if (d / ita).is_file() else p_reg
+                    p_bi = d / bld_ita if (d / bld_ita).is_file() else p_bld
+                    pdfmetrics.registerFont(TTFont("VelmoSans", str(p_reg)))
+                    pdfmetrics.registerFont(TTFont("VelmoSans-Bold", str(p_bld)))
+                    pdfmetrics.registerFont(TTFont("VelmoSans-Italic", str(p_ita)))
+                    pdfmetrics.registerFont(TTFont("VelmoSans-BoldItalic", str(p_bi)))
+                    pdfmetrics.registerFontFamily(
+                        "VelmoSans",
+                        normal="VelmoSans",
+                        bold="VelmoSans-Bold",
+                        italic="VelmoSans-Italic",
+                        boldItalic="VelmoSans-BoldItalic",
+                    )
+                    _REPORTLAB_SANS_FAMILY = "VelmoSans"
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed registering sans font from {p_reg}: {e}")
+        if _REPORTLAB_SANS_FAMILY == "VelmoSans":
+            break
+
+    for d in candidate_dirs:
+        if not d.is_dir():
+            continue
+        for reg, bld in mono_specs:
+            p_reg = d / reg
+            if p_reg.is_file():
+                try:
+                    p_bld = d / bld if (d / bld).is_file() else p_reg
+                    pdfmetrics.registerFont(TTFont("VelmoMono", str(p_reg)))
+                    pdfmetrics.registerFont(TTFont("VelmoMono-Bold", str(p_bld)))
+                    pdfmetrics.registerFontFamily(
+                        "VelmoMono",
+                        normal="VelmoMono",
+                        bold="VelmoMono-Bold",
+                        italic="VelmoMono",
+                        boldItalic="VelmoMono-Bold",
+                    )
+                    _REPORTLAB_MONO_FAMILY = "VelmoMono"
+                    break
+                except Exception as e:
+                    logger.warning(f"Failed registering mono font from {p_reg}: {e}")
+        if _REPORTLAB_MONO_FAMILY == "VelmoMono":
+            break
+
+    _REPORTLAB_FONTS_INITIALIZED = True
+    return _REPORTLAB_SANS_FAMILY, _REPORTLAB_MONO_FAMILY
+
+
+class _VelmoNumberedCanvas(rl_canvas.Canvas):
+    """Two-pass ReportLab canvas supporting accurate 'Page X of Y' running footers."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_page_states: List[dict] = []
+
+    def showPage(self):
+        self._saved_page_states.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total_pages = len(self._saved_page_states)
+        for state in self._saved_page_states:
+            self.__dict__.update(state)
+            self._draw_deferred_page_footer(total_pages)
+            super().showPage()
+        super().save()
+
+    def _draw_deferred_page_footer(self, total_pages: int):
+        cb = getattr(self, "_velmo_footer_cb", None)
+        if cb is not None:
+            cb(self, self._pageNumber, total_pages)
+
+
+def _flatten_image_for_reportlab(img_bytes: bytes) -> Tuple[bytes, int, int]:
+    """Composites any transparent PNG/RGBA/LA/P image onto opaque white and returns (png_bytes, w, h)."""
+    with Image.open(io.BytesIO(img_bytes)) as im:
+        iw, ih = max(im.width, 1), max(im.height, 1)
+        fmt = (im.format or "").upper()
+        mode = im.mode
+        has_alpha = mode in ("RGBA", "LA") or (mode == "P" and "transparency" in im.info)
+        if has_alpha:
+            im_rgba = im.convert("RGBA")
+            bg = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
+            flat = Image.alpha_composite(bg, im_rgba).convert("RGB")
+            buf = io.BytesIO()
+            flat.save(buf, format="PNG")
+            return buf.getvalue(), iw, ih
+        if fmt not in ("PNG", "JPEG", "JPG") or mode not in ("RGB", "L"):
+            rgb = im.convert("RGB")
+            buf = io.BytesIO()
+            rgb.save(buf, format="PNG")
+            return buf.getvalue(), iw, ih
+        return img_bytes, iw, ih
+
+
+def _extract_oxml_paragraph_data(p_elem, doc: Document) -> Dict[str, Any]:
+    """
+    Walks a <w:p> XML element cleanly to extract:
+    - ordered inline segments (text, bold, italic, underline, color, mono, link_url)
+    - embedded images [(rId, cx_pt, cy_pt)]
+    - explicit page breaks (before / inline)
+    - heading level, list bullet/number info, alignment, callout shading/borders
+    """
+    ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    ns_r = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    ns_a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    ns_wp = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+    ns_v = "{urn:schemas-microsoft-com:vml}"
+
+    p_obj = Paragraph(p_elem, doc)
+    style_name = (p_obj.style.name if p_obj.style else "") or ""
+    style_id = (p_obj.style.style_id if p_obj.style else "") or ""
+    pPr = p_elem.find(f"{ns_w}pPr")
+
+    page_break_before = False
+    has_section_break = False
+    is_callout = False
+    callout_bg = None
+    callout_border = None
+    list_info: Optional[Dict[str, Any]] = None
+    align_val = TA_LEFT
+
+    if p_obj.alignment == 1:
+        align_val = TA_CENTER
+    elif p_obj.alignment == 2:
+        align_val = TA_RIGHT
+    elif p_obj.alignment == 3:
+        align_val = TA_JUSTIFY
+
+    if pPr is not None:
+        if pPr.find(f"{ns_w}pageBreakBefore") is not None:
+            page_break_before = True
+        if pPr.find(f"{ns_w}sectPr") is not None:
+            has_section_break = True
+
+        shd = pPr.find(f"{ns_w}shd")
+        if shd is not None:
+            fill = (shd.get(f"{ns_w}fill") or "").strip().upper()
+            if re.match(r"^[0-9A-F]{6}$", fill) and fill not in ("FFFFFF", "AUTO"):
+                callout_bg = fill
+                is_callout = True
+
+        pBdr = pPr.find(f"{ns_w}pBdr")
+        if pBdr is not None:
+            left_b = pBdr.find(f"{ns_w}left")
+            if left_b is not None:
+                bcol = (left_b.get(f"{ns_w}color") or "").strip().upper()
+                if re.match(r"^[0-9A-F]{6}$", bcol):
+                    callout_border = bcol
+                    is_callout = True
+
+        numPr = pPr.find(f"{ns_w}numPr")
+        if numPr is not None:
+            ilvl_el = numPr.find(f"{ns_w}ilvl")
+            numId_el = numPr.find(f"{ns_w}numId")
+            ilvl = int(ilvl_el.get(f"{ns_w}val", "0")) if ilvl_el is not None else 0
+            num_id = numId_el.get(f"{ns_w}val", "0") if numId_el is not None else "0"
+            if num_id != "0":
+                list_info = {"num_id": num_id, "ilvl": ilvl, "ordered": "number" in style_name.lower()}
+
+    if list_info is None:
+        sn_low = style_name.lower()
+        if "list bullet" in sn_low:
+            lvl = 1 if ("2" in sn_low or "3" in sn_low) else 0
+            list_info = {"num_id": "style_bullet", "ilvl": lvl, "ordered": False}
+        elif "list number" in sn_low:
+            lvl = 1 if ("2" in sn_low or "3" in sn_low) else 0
+            list_info = {"num_id": "style_number", "ilvl": lvl, "ordered": True}
+
+    # Resolve ordered vs bullet from numbering.xml if available
+    if list_info is not None and list_info["num_id"] not in ("style_bullet", "style_number"):
+        try:
+            num_part = doc.part.numbering_part
+            if num_part is not None:
+                num_el = num_part.element.xpath(f'.//w:num[@w:numId="{list_info["num_id"]}"]')
+                if num_el:
+                    abs_id_el = num_el[0].find(f"{ns_w}abstractNumId")
+                    if abs_id_el is not None:
+                        abs_id = abs_id_el.get(f"{ns_w}val")
+                        lvl_els = num_part.element.xpath(
+                            f'.//w:abstractNum[@w:abstractNumId="{abs_id}"]/w:lvl[@w:ilvl="{list_info["ilvl"]}"]/w:numFmt'
+                        )
+                        if lvl_els:
+                            fmt_val = (lvl_els[0].get(f"{ns_w}val") or "").lower()
+                            list_info["ordered"] = fmt_val != "bullet"
+        except Exception:
+            pass
+
+    if "quote" in style_name.lower():
+        is_callout = True
+
+    heading_level = 0
+    m_h = re.match(r"^(?:Heading|Titre)\s*([1-6])$", style_name, re.I) or re.match(r"^Heading([1-6])$", style_id, re.I)
+    if m_h:
+        heading_level = int(m_h.group(1))
+    elif style_name.lower() == "title":
+        heading_level = 1
+
+    segments: List[Dict[str, Any]] = []
+    images: List[Tuple[str, Optional[float], Optional[float]]] = []
+    inline_page_breaks = 0
+    mono_chars = 0
+    total_chars = 0
+
+    def _parse_rpr(r_el) -> Dict[str, Any]:
+        rPr = r_el.find(f"{ns_w}rPr")
+        bold = False
+        italic = False
+        underline = False
+        color = None
+        font_name = ""
+        font_size = None
+        if rPr is not None:
+            b_el = rPr.find(f"{ns_w}b")
+            if b_el is not None and (b_el.get(f"{ns_w}val") or "true").lower() not in ("0", "false"):
+                bold = True
+            i_el = rPr.find(f"{ns_w}i")
+            if i_el is not None and (i_el.get(f"{ns_w}val") or "true").lower() not in ("0", "false"):
+                italic = True
+            u_el = rPr.find(f"{ns_w}u")
+            if u_el is not None and (u_el.get(f"{ns_w}val") or "single").lower() != "none":
+                underline = True
+            c_el = rPr.find(f"{ns_w}color")
+            if c_el is not None:
+                cval = (c_el.get(f"{ns_w}val") or "").strip().upper()
+                if re.match(r"^[0-9A-F]{6}$", cval):
+                    color = cval
+            rFonts = rPr.find(f"{ns_w}rFonts")
+            if rFonts is not None:
+                font_name = rFonts.get(f"{ns_w}ascii") or rFonts.get(f"{ns_w}hAnsi") or rFonts.get(f"{ns_w}cs") or ""
+            sz_el = rPr.find(f"{ns_w}sz")
+            if sz_el is not None:
+                try:
+                    font_size = int(sz_el.get(f"{ns_w}val")) / 2.0
+                except Exception:
+                    pass
+        return {
+            "bold": bold,
+            "italic": italic,
+            "underline": underline,
+            "color": color,
+            "mono": _is_mono_font(font_name),
+            "size": font_size,
+        }
+
+    def _walk_run(r_el, link_url: Optional[str] = None):
+        nonlocal inline_page_breaks, mono_chars, total_chars
+        meta = _parse_rpr(r_el)
+        if link_url and not meta["color"]:
+            meta["color"] = "2563EB"
+            meta["underline"] = True
+
+        for ch in r_el:
+            tag = ch.tag
+            if tag == f"{ns_w}t":
+                txt = ch.text or ""
+                if txt:
+                    segments.append({"text": txt, "url": link_url, **meta})
+                    n_ns = len(txt.strip())
+                    total_chars += n_ns
+                    if meta["mono"]:
+                        mono_chars += n_ns
+            elif tag == f"{ns_w}tab":
+                segments.append({"text": "    ", "url": link_url, **meta})
+            elif tag == f"{ns_w}br":
+                btype = (ch.get(f"{ns_w}type") or "").lower()
+                if btype == "page":
+                    inline_page_breaks += 1
+                else:
+                    segments.append({"text": "\n", "url": link_url, **meta})
+            elif tag in (f"{ns_w}drawing", f"{ns_w}pict"):
+                # Extract DrawingML blip or VML imagedata
+                for blip in ch.iter(f"{ns_a}blip"):
+                    rid = blip.get(f"{ns_r}embed") or blip.get(f"{ns_r}link")
+                    if rid:
+                        cx_pt, cy_pt = None, None
+                        for ext_el in ch.iter(f"{ns_wp}extent"):
+                            try:
+                                cx = int(ext_el.get("cx", "0"))
+                                cy = int(ext_el.get("cy", "0"))
+                                if cx > 0 and cy > 0:
+                                    cx_pt = cx / 12700.0
+                                    cy_pt = cy / 12700.0
+                            except Exception:
+                                pass
+                            break
+                        images.append((rid, cx_pt, cy_pt))
+                for vimg in ch.iter(f"{ns_v}imagedata"):
+                    rid = vimg.get(f"{ns_r}id")
+                    if rid:
+                        images.append((rid, None, None))
+
+    for child in p_elem:
+        if child.tag == f"{ns_w}r":
+            _walk_run(child, None)
+        elif child.tag == f"{ns_w}hyperlink":
+            rid = child.get(f"{ns_r}id")
+            anchor = child.get(f"{ns_w}anchor")
+            url = None
+            if rid and rid in doc.part.rels:
+                url = doc.part.rels[rid].target_ref
+            elif anchor:
+                url = f"#{anchor}"
+            for r_sub in child.findall(f"{ns_w}r"):
+                _walk_run(r_sub, url)
+        elif child.tag == f"{ns_w}fldSimple":
+            instr = (child.get(f"{ns_w}instr") or "").upper()
+            if "PAGE" in instr and "NUMPAGES" not in instr:
+                segments.append({"text": "__VELMO_PAGE__", "url": None, "bold": False, "italic": False, "underline": False, "color": None, "mono": False, "size": None})
+            elif "NUMPAGES" in instr:
+                segments.append({"text": "__VELMO_NUMPAGES__", "url": None, "bold": False, "italic": False, "underline": False, "color": None, "mono": False, "size": None})
+            else:
+                for r_sub in child.findall(f"{ns_w}r"):
+                    _walk_run(r_sub, None)
+
+    is_mono_block = total_chars > 0 and (mono_chars / total_chars) >= 0.85 and ("\n" in "".join(s["text"] for s in segments) or is_callout)
+    plain_text = "".join(s["text"] for s in segments)
+    return {
+        "segments": segments,
+        "plain_text": plain_text,
+        "images": images,
+        "heading_level": heading_level,
+        "list_info": list_info,
+        "align": align_val,
+        "page_break_before": page_break_before,
+        "inline_page_breaks": inline_page_breaks,
+        "has_section_break": has_section_break,
+        "is_callout": is_callout,
+        "callout_bg": callout_bg,
+        "callout_border": callout_border,
+        "is_mono_block": is_mono_block,
+    }
+
+
+def _segments_to_rl_markup(
+    segments: List[Dict[str, Any]],
+    mono_family: str,
+    preserve_newlines: bool = False,
+    default_color: Optional[str] = None,
+    strip_edges: bool = True,
+) -> str:
+    """Converts extracted paragraph segments into ReportLab XML markup with links and inline formatting."""
+    parts: List[str] = []
+    # Merge adjacent segments with same URL so ReportLab renders a single crisp <a> link
+    merged: List[Dict[str, Any]] = []
+    for seg in segments:
+        txt = seg["text"]
+        if not txt:
+            continue
+        if (
+            merged
+            and seg.get("url") is not None
+            and merged[-1].get("url") == seg.get("url")
+            and merged[-1].get("bold") == seg.get("bold")
+            and merged[-1].get("italic") == seg.get("italic")
+        ):
+            merged[-1]["text"] += txt
+        else:
+            merged.append(dict(seg))
+
+    for seg in merged:
+        txt = html.escape(seg["text"])
+        if preserve_newlines:
+            txt = txt.replace("  ", "&nbsp;&nbsp;").replace("\n", "<br/>")
+        else:
+            txt = txt.replace("\n", "<br/>")
+
+        if seg.get("mono"):
+            txt = f'<font name="{mono_family}">{txt}</font>'
+        if seg.get("bold"):
+            txt = f"<b>{txt}</b>"
+        if seg.get("italic"):
+            txt = f"<i>{txt}</i>"
+        if seg.get("underline") and not seg.get("url"):
+            txt = f"<u>{txt}</u>"
+
+        col = seg.get("color") or default_color
+        if seg.get("url"):
+            esc_url = html.escape(seg["url"], quote=True)
+            link_col = f"#{col}" if col else "#2563EB"
+            txt = f'<a href="{esc_url}" color="{link_col}"><u>{txt}</u></a>'
+        elif col and col.upper() not in ("000000", "AUTO"):
+            txt = f'<font color="#{col}">{txt}</font>'
+        parts.append(txt)
+
+    joined = "".join(parts)
+    return joined.strip() if strip_edges else joined
+
+
+def _extract_docx_table_grid_and_spans(table: Table, doc: Document):
+    """
+    Parses a python-docx Table accurately handling horizontal (gridSpan) and vertical (vMerge) merges,
+    background cell fills, repeating header rows (w:tblHeader), and gridCol relative widths.
+    """
+    ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    tbl_el = table._tbl
+
+    # Extract gridCol widths (in twips -> points)
+    grid_widths: List[float] = []
+    tblGrid = tbl_el.find(f"{ns_w}tblGrid")
+    if tblGrid is not None:
+        for gc_el in tblGrid.findall(f"{ns_w}gridCol"):
+            w_tw = gc_el.get(f"{ns_w}w")
+            if w_tw and w_tw.isdigit():
+                grid_widths.append(int(w_tw) / 20.0)
+
+    tr_list = tbl_el.findall(f"{ns_w}tr")
+    num_rows = len(tr_list)
+    if num_rows == 0:
+        return [], [], 0, []
+
+    raw_rows: List[List[Optional[dict]]] = []
+    repeat_hdr_rows = 0
+    max_cols = len(grid_widths)
+
+    for r_idx, tr in enumerate(tr_list):
+        trPr = tr.find(f"{ns_w}trPr")
+        if trPr is not None and trPr.find(f"{ns_w}tblHeader") is not None and r_idx == repeat_hdr_rows:
+            repeat_hdr_rows += 1
+
+        row_cells: List[Optional[dict]] = []
+        for tc in tr.findall(f"{ns_w}tc"):
+            tcPr = tc.find(f"{ns_w}tcPr")
+            grid_span = 1
+            v_merge = None
+            fill_hex = None
+            if tcPr is not None:
+                gs_el = tcPr.find(f"{ns_w}gridSpan")
+                if gs_el is not None:
+                    try:
+                        grid_span = max(1, int(gs_el.get(f"{ns_w}val", "1")))
+                    except Exception:
+                        grid_span = 1
+                vm_el = tcPr.find(f"{ns_w}vMerge")
+                if vm_el is not None:
+                    v_merge = (vm_el.get(f"{ns_w}val") or "continue").lower()
+                shd_el = tcPr.find(f"{ns_w}shd")
+                if shd_el is not None:
+                    fval = (shd_el.get(f"{ns_w}fill") or "").strip().upper()
+                    if re.match(r"^[0-9A-F]{6}$", fval) and fval != "AUTO":
+                        fill_hex = fval
+
+            para_infos = [_extract_oxml_paragraph_data(p_el, doc) for p_el in tc.findall(f"{ns_w}p")]
+            cell_info = {
+                "paras": para_infos,
+                "grid_span": grid_span,
+                "v_merge": v_merge,
+                "fill": fill_hex,
+                "is_origin": True,
+            }
+            row_cells.append(cell_info)
+            for _ in range(grid_span - 1):
+                row_cells.append({"paras": [], "grid_span": 1, "v_merge": v_merge, "fill": fill_hex, "is_origin": False})
+
+        max_cols = max(max_cols, len(row_cells))
+        raw_rows.append(row_cells)
+
+    if max_cols == 0:
+        return [], [], 0, []
+
+    for r in raw_rows:
+        while len(r) < max_cols:
+            r.append({"paras": [], "grid_span": 1, "v_merge": None, "fill": None, "is_origin": False})
+
+    # Compute SPAN commands for both horizontal and vertical merges
+    span_cmds: List[Tuple[int, int, int, int]] = []  # (c0, r0, c1, r1)
+    visited = [[False] * max_cols for _ in range(num_rows)]
+
+    for r0 in range(num_rows):
+        for c0 in range(max_cols):
+            if visited[r0][c0]:
+                continue
+            cell = raw_rows[r0][c0]
+            if not cell or not cell["is_origin"]:
+                visited[r0][c0] = True
+                continue
+            c1 = min(max_cols - 1, c0 + cell["grid_span"] - 1)
+            r1 = r0
+            if cell["v_merge"] == "restart":
+                while r1 + 1 < num_rows:
+                    below = raw_rows[r1 + 1][c0]
+                    if below and below["v_merge"] == "continue":
+                        below["is_origin"] = False
+                        r1 += 1
+                    else:
+                        break
+            for rr in range(r0, r1 + 1):
+                for cc in range(c0, c1 + 1):
+                    visited[rr][cc] = True
+                    if rr != r0 or cc != c0:
+                        raw_rows[rr][cc]["is_origin"] = False
+            if c1 > c0 or r1 > r0:
+                span_cmds.append((c0, r0, c1, r1))
+
+    if repeat_hdr_rows == 0 and num_rows > 3:
+        repeat_hdr_rows = 1
+
+    return raw_rows, span_cmds, repeat_hdr_rows, grid_widths
+
+
+def _compute_smart_table_col_widths(
+    raw_rows: List[List[Optional[dict]]],
+    grid_widths: List[float],
+    avail_width: float,
+) -> Tuple[List[float], float]:
+    """Computes balanced ReportLab column widths strictly within avail_width and picks clean font size."""
+    num_cols = len(raw_rows[0]) if raw_rows else 0
+    if num_cols == 0:
+        return [], 8.5
+
+    if num_cols >= 10:
+        font_pt = 6.5
+        pad_pt = 4.5
+    elif num_cols >= 8:
+        font_pt = 7.0
+        pad_pt = 5.5
+    elif num_cols >= 6:
+        font_pt = 8.0
+        pad_pt = 7.0
+    else:
+        font_pt = 8.8
+        pad_pt = 9.0
+
+    # Estimate minimum natural width (longest unbreakable word) and desired width per column
+    min_w = [26.0] * num_cols
+    pref_w = [36.0] * num_cols
+
+    for r in raw_rows:
+        for c_i, cell in enumerate(r):
+            if not cell or not cell["is_origin"] or cell["grid_span"] > 1:
+                continue
+            txt = " ".join(p["plain_text"] for p in cell["paras"]).strip()
+            if not txt:
+                continue
+            words = re.split(r"\s+", txt)
+            longest_word = max((len(w) for w in words), default=0)
+            avg_char = font_pt * 0.56
+            min_w[c_i] = max(min_w[c_i], longest_word * avg_char + pad_pt)
+            pref_w[c_i] = max(pref_w[c_i], min(len(txt), 34) * avg_char + pad_pt)
+
+    # Blend with Word gridCol hints if valid
+    if len(grid_widths) == num_cols and sum(grid_widths) > 0:
+        g_scale = avail_width / sum(grid_widths)
+        for c_i in range(num_cols):
+            pref_w[c_i] = max(min_w[c_i], 0.55 * pref_w[c_i] + 0.45 * (grid_widths[c_i] * g_scale))
+
+    sum_min = sum(min_w)
+    if sum_min >= avail_width:
+        # Shrink font slightly if even minimum words exceed avail_width
+        ratio = avail_width / max(sum_min, 1.0)
+        if ratio < 0.92:
+            font_pt = max(5.6, round(font_pt * max(ratio, 0.78), 1))
+        widths = [w * ratio for w in min_w]
+    else:
+        extra = avail_width - sum_min
+        deltas = [max(pref_w[i] - min_w[i], 0.5) for i in range(num_cols)]
+        sum_delta = sum(deltas)
+        widths = [min_w[i] + extra * (deltas[i] / sum_delta) for i in range(num_cols)]
+
+    return widths, font_pt
+
+
+def _is_dark_hex(hex_str: Optional[str]) -> bool:
+    if not hex_str or not re.match(r"^[0-9A-F]{6}$", hex_str.upper()):
+        return False
+    r = int(hex_str[0:2], 16)
+    g = int(hex_str[2:4], 16)
+    b = int(hex_str[4:6], 16)
+    lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return lum < 115.0
+
+
 def convert_via_libreoffice(input_bytes: bytes, suffix: str) -> Optional[bytes]:
     soffice = get_libreoffice_command()
     if not soffice:
@@ -1296,68 +1945,342 @@ def docx_to_pdf(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int
 
 
 def _docx_to_pdf_reportlab(docx_bytes: bytes) -> bytes:
+    sans_family, mono_family = _ensure_reportlab_unicode_fonts()
     doc = Document(io.BytesIO(docx_bytes))
     buffer = io.BytesIO()
-    pdf_doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+
+    # Collect per-section geometry and header/footer text
+    sections_meta = []
+    for sec in doc.sections:
+        pw = sec.page_width.pt if sec.page_width else letter[0]
+        ph = sec.page_height.pt if sec.page_height else letter[1]
+        if sec.orientation == WD_ORIENTATION.LANDSCAPE and pw < ph:
+            pw, ph = ph, pw
+        elif sec.orientation == WD_ORIENTATION.PORTRAIT and pw > ph:
+            pw, ph = ph, pw
+
+        lm = max(sec.left_margin.pt if sec.left_margin else 42.0, 28.0)
+        rm = max(sec.right_margin.pt if sec.right_margin else 42.0, 28.0)
+        tm = max(sec.top_margin.pt if sec.top_margin else 44.0, 42.0)
+        bm = max(sec.bottom_margin.pt if sec.bottom_margin else 44.0, 42.0)
+
+        hdr_text = ""
+        if sec.header:
+            hdr_parts = []
+            for p in sec.header.paragraphs:
+                p_info = _extract_oxml_paragraph_data(p._p, doc)
+                t = p_info["plain_text"].strip()
+                if t:
+                    hdr_parts.append(t)
+            hdr_text = " | ".join(hdr_parts)
+
+        ftr_text = ""
+        if sec.footer:
+            ftr_parts = []
+            for p in sec.footer.paragraphs:
+                p_info = _extract_oxml_paragraph_data(p._p, doc)
+                t = p_info["plain_text"].strip()
+                if t:
+                    ftr_parts.append(t)
+            ftr_text = " | ".join(ftr_parts)
+
+        sections_meta.append({
+            "pw": pw,
+            "ph": ph,
+            "lm": lm,
+            "rm": rm,
+            "tm": tm,
+            "bm": bm,
+            "avail_w": max(pw - lm - rm, 120.0),
+            "avail_h": max(ph - tm - bm, 120.0),
+            "hdr": hdr_text,
+            "ftr": ftr_text,
+        })
+
+    if not sections_meta:
+        sections_meta.append({
+            "pw": letter[0], "ph": letter[1], "lm": 42.0, "rm": 42.0, "tm": 44.0, "bm": 44.0,
+            "avail_w": letter[0] - 84.0, "avail_h": letter[1] - 88.0, "hdr": "", "ftr": "",
+        })
+
+    def _make_on_page(sec_m: dict):
+        def _on_page(canvas_obj, doc_obj):
+            canvas_obj.saveState()
+            if sec_m["hdr"]:
+                canvas_obj.setFont(sans_family, 8.0)
+                canvas_obj.setFillColor(colors.HexColor("#64748B"))
+                canvas_obj.drawString(sec_m["lm"], sec_m["ph"] - 26.0, sec_m["hdr"][:120])
+                canvas_obj.setStrokeColor(colors.HexColor("#E2E8F0"))
+                canvas_obj.setLineWidth(0.5)
+                canvas_obj.line(sec_m["lm"], sec_m["ph"] - 31.0, sec_m["pw"] - sec_m["rm"], sec_m["ph"] - 31.0)
+            canvas_obj.restoreState()
+
+            def _deferred_footer(c_obj, p_no: int, tot_p: int):
+                if not sec_m["ftr"]:
+                    return
+                c_obj.saveState()
+                c_obj.setStrokeColor(colors.HexColor("#E2E8F0"))
+                c_obj.setLineWidth(0.5)
+                c_obj.line(sec_m["lm"], 32.0, sec_m["pw"] - sec_m["rm"], 32.0)
+                c_obj.setFont(sans_family, 8.0)
+                c_obj.setFillColor(colors.HexColor("#64748B"))
+                ftr_str = sec_m["ftr"].replace("__VELMO_PAGE__", str(p_no)).replace("__VELMO_NUMPAGES__", str(tot_p))
+                c_obj.drawString(sec_m["lm"], 20.0, ftr_str[:135])
+                c_obj.restoreState()
+
+            canvas_obj._velmo_footer_cb = _deferred_footer
+
+        return _on_page
+
+    page_templates: List[PageTemplate] = []
+    for s_idx, sm in enumerate(sections_meta):
+        frame = Frame(
+            sm["lm"],
+            sm["bm"],
+            sm["avail_w"],
+            sm["avail_h"],
+            id=f"frame_{s_idx}",
+            leftPadding=0,
+            rightPadding=0,
+            topPadding=0,
+            bottomPadding=0,
+        )
+        page_templates.append(
+            PageTemplate(
+                id=f"sec_{s_idx}",
+                frames=[frame],
+                pagesize=(sm["pw"], sm["ph"]),
+                onPage=_make_on_page(sm),
+            )
+        )
+
+    pdf_doc = BaseDocTemplate(
+        buffer,
+        pagesize=(sections_meta[0]["pw"], sections_meta[0]["ph"]),
+        leftMargin=sections_meta[0]["lm"],
+        rightMargin=sections_meta[0]["rm"],
+        topMargin=sections_meta[0]["tm"],
+        bottomMargin=sections_meta[0]["bm"],
+        pageTemplates=page_templates,
+    )
 
     styles = getSampleStyleSheet()
-    h1_style = ParagraphStyle('DocxH1', parent=styles['Heading1'], fontSize=16, leading=20, spaceAfter=8, textColor=colors.HexColor('#0F172A'))
-    h2_style = ParagraphStyle('DocxH2', parent=styles['Heading2'], fontSize=13, leading=16, spaceAfter=6, textColor=colors.HexColor('#1E293B'))
-    body_style = ParagraphStyle('DocxBody', parent=styles['Normal'], fontSize=10, leading=14, spaceAfter=6, textColor=colors.HexColor('#334155'))
-    cell_style = ParagraphStyle('DocxCell', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#0F172A'))
-    cell_bold_style = ParagraphStyle('DocxCellBold', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold', textColor=colors.HexColor('#0F172A'))
+    h1_style = ParagraphStyle(
+        "DocxH1", parent=styles["Heading1"], fontName=f"{sans_family}-Bold" if sans_family == "VelmoSans" else "Helvetica-Bold",
+        fontSize=16, leading=20, spaceBefore=6, spaceAfter=6, textColor=colors.HexColor("#0F172A"), keepWithNext=True,
+    )
+    h2_style = ParagraphStyle(
+        "DocxH2", parent=styles["Heading2"], fontName=f"{sans_family}-Bold" if sans_family == "VelmoSans" else "Helvetica-Bold",
+        fontSize=13, leading=17, spaceBefore=6, spaceAfter=4, textColor=colors.HexColor("#1E293B"), keepWithNext=True,
+    )
+    h3_style = ParagraphStyle(
+        "DocxH3", parent=styles["Heading3"], fontName=f"{sans_family}-Bold" if sans_family == "VelmoSans" else "Helvetica-Bold",
+        fontSize=11, leading=14.5, spaceBefore=5, spaceAfter=3, textColor=colors.HexColor("#1E293B"), keepWithNext=True,
+    )
+    h4_style = ParagraphStyle(
+        "DocxH4", parent=styles["Heading4"], fontName=f"{sans_family}-Bold" if sans_family == "VelmoSans" else "Helvetica-Bold",
+        fontSize=10, leading=13.5, spaceBefore=4, spaceAfter=3, textColor=colors.HexColor("#334155"), keepWithNext=True,
+    )
+    body_style = ParagraphStyle(
+        "DocxBody", parent=styles["Normal"], fontName=sans_family,
+        fontSize=9.8, leading=13.6, spaceAfter=5, textColor=colors.HexColor("#1E293B"),
+    )
+    code_style = ParagraphStyle(
+        "DocxCode", parent=styles["Normal"], fontName=mono_family,
+        fontSize=8.0, leading=10.8, textColor=colors.HexColor("#0F172A"),
+    )
 
     story = []
+    keepalive_bufs: List[io.BytesIO] = []
+    list_counters: Dict[Tuple[str, int], int] = {}
+    cur_sec_idx = 0
+
     for child in doc.element.body.iterchildren():
-        if child.tag.endswith('p'):
-            p = Paragraph(child, doc)
-            text = p.text.strip()
-            if not text:
-                continue
-            if p.runs and any(r.bold for r in p.runs):
-                run_parts = [f"<b>{html.escape(r.text)}</b>" if r.bold else html.escape(r.text) for r in p.runs]
-                formatted_text = "".join(run_parts)
-            else:
-                formatted_text = html.escape(text)
+        sm = sections_meta[min(cur_sec_idx, len(sections_meta) - 1)]
 
-            if p.style.name.startswith("Heading 1"):
-                story.append(RLParagraph(formatted_text, h1_style))
-            elif p.style.name.startswith("Heading"):
-                story.append(RLParagraph(formatted_text, h2_style))
-            else:
-                story.append(RLParagraph(formatted_text, body_style))
+        if child.tag.endswith("p"):
+            info = _extract_oxml_paragraph_data(child, doc)
+            if info["page_break_before"]:
+                story.append(PageBreak())
 
-        elif child.tag.endswith('tbl'):
+            # Embedded images inside paragraph
+            for rid, cx_pt, cy_pt in info["images"]:
+                rel_part = doc.part.related_parts.get(rid)
+                if rel_part is None:
+                    continue
+                try:
+                    flat_bytes, iw, ih = _flatten_image_for_reportlab(rel_part.blob)
+                    target_w = cx_pt if cx_pt else (sm["avail_w"] * 0.85)
+                    target_h = cy_pt if cy_pt else (target_w * (ih / iw))
+                    max_w = sm["avail_w"] - 4.0
+                    max_h = sm["avail_h"] * 0.72
+                    scale = min(max_w / max(target_w, 1.0), max_h / max(target_h, 1.0), 1.0)
+                    draw_w = target_w * scale
+                    draw_h = target_h * scale
+                    buf = io.BytesIO(flat_bytes)
+                    keepalive_bufs.append(buf)
+                    rl_img = RLImage(buf, width=draw_w, height=draw_h)
+                    rl_img.hAlign = "CENTER" if info["align"] == TA_CENTER else ("RIGHT" if info["align"] == TA_RIGHT else "LEFT")
+                    story.append(rl_img)
+                    story.append(Spacer(1, 4))
+                except Exception as img_err:
+                    logger.warning(f"Failed rendering DOCX embedded image {rid}: {img_err}")
+
+            # Text content
+            if info["plain_text"].strip():
+                if info["is_mono_block"]:
+                    markup = _segments_to_rl_markup(info["segments"], mono_family, preserve_newlines=True, strip_edges=False)
+                    box = RLTable([[RLParagraph(markup, code_style)]], colWidths=[sm["avail_w"] - 12])
+                    box.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F1F5F9")),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                        ("LINEBEFORE", (0, 0), (0, -1), 3.0, colors.HexColor("#475569")),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ]))
+                    story.append(box)
+                    story.append(Spacer(1, 6))
+                elif info["is_callout"]:
+                    markup = _segments_to_rl_markup(info["segments"], mono_family)
+                    bg_hex = f"#{info['callout_bg']}" if info["callout_bg"] else "#EFF6FF"
+                    bd_hex = f"#{info['callout_border']}" if info["callout_border"] else "#2563EB"
+                    box = RLTable([[RLParagraph(markup, body_style)]], colWidths=[sm["avail_w"] - 12])
+                    box.setStyle(TableStyle([
+                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(bg_hex)),
+                        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                        ("LINEBEFORE", (0, 0), (0, -1), 3.5, colors.HexColor(bd_hex)),
+                        ("TOPPADDING", (0, 0), (-1, -1), 6),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                    ]))
+                    story.append(box)
+                    story.append(Spacer(1, 6))
+                else:
+                    markup = _segments_to_rl_markup(info["segments"], mono_family)
+                    hl = info["heading_level"]
+                    if hl == 1:
+                        st = ParagraphStyle("H1Dyn", parent=h1_style, alignment=info["align"])
+                        story.append(RLParagraph(markup, st))
+                    elif hl == 2:
+                        st = ParagraphStyle("H2Dyn", parent=h2_style, alignment=info["align"])
+                        story.append(RLParagraph(markup, st))
+                    elif hl == 3:
+                        st = ParagraphStyle("H3Dyn", parent=h3_style, alignment=info["align"])
+                        story.append(RLParagraph(markup, st))
+                    elif hl >= 4:
+                        st = ParagraphStyle("H4Dyn", parent=h4_style, alignment=info["align"])
+                        story.append(RLParagraph(markup, st))
+                    elif info["list_info"] is not None:
+                        li = info["list_info"]
+                        ilvl = li["ilvl"]
+                        if li["ordered"]:
+                            key = (li["num_id"], ilvl)
+                            list_counters[key] = list_counters.get(key, 0) + 1
+                            prefix = f"{list_counters[key]}. "
+                        else:
+                            bullets = ["• ", "◦ ", "▪ "]
+                            prefix = bullets[min(ilvl, 2)]
+                        st = ParagraphStyle(
+                            f"ListL{ilvl}", parent=body_style,
+                            leftIndent=16 + ilvl * 16, firstLineIndent=-10, spaceAfter=3, alignment=info["align"],
+                        )
+                        story.append(RLParagraph(f"{prefix}{markup}", st))
+                    else:
+                        st = ParagraphStyle("BodyDyn", parent=body_style, alignment=info["align"])
+                        story.append(RLParagraph(markup, st))
+
+            for _ in range(info["inline_page_breaks"]):
+                story.append(PageBreak())
+
+            if info["has_section_break"] and cur_sec_idx + 1 < len(sections_meta):
+                cur_sec_idx += 1
+                story.append(NextPageTemplate(f"sec_{cur_sec_idx}"))
+                story.append(PageBreak())
+
+        elif child.tag.endswith("tbl"):
             table = Table(child, doc)
+            raw_rows, span_cmds, repeat_hdr_rows, grid_widths = _extract_docx_table_grid_and_spans(table, doc)
+            if not raw_rows:
+                continue
+
+            col_widths, tbl_font_pt = _compute_smart_table_col_widths(raw_rows, grid_widths, sm["avail_w"])
+            tbl_leading = round(tbl_font_pt * 1.28, 1)
+
             table_data = []
-            for r_idx, row in enumerate(table.rows):
+            ts_cmds = [
+                ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#CBD5E1")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3.5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3.5),
+            ]
+
+            for r_idx, row in enumerate(raw_rows):
                 row_data = []
-                for cell in row.cells:
-                    c_text = html.escape(cell.text.strip())
-                    is_bold = (r_idx == 0) or any(r.bold for p in cell.paragraphs for r in p.runs)
-                    st = cell_bold_style if is_bold else cell_style
-                    row_data.append(RLParagraph(c_text, st))
+                is_hdr = r_idx < repeat_hdr_rows
+                for c_idx, cell in enumerate(row):
+                    if not cell or not cell["is_origin"]:
+                        row_data.append("")
+                        continue
+
+                    fill_hex = cell["fill"] or ("0F172A" if is_hdr else ("F8FAFC" if r_idx % 2 == 1 else "FFFFFF"))
+                    dark_bg = _is_dark_hex(fill_hex)
+                    ts_cmds.append(("BACKGROUND", (c_idx, r_idx), (c_idx, r_idx), colors.HexColor(f"#{fill_hex}")))
+
+                    def_text_hex = "FFFFFF" if dark_bg else "0F172A"
+                    cell_paras = []
+                    for p_info in cell["paras"]:
+                        if p_info["plain_text"].strip():
+                            # Override dark default run color when cell fill is dark
+                            segs = []
+                            for s in p_info["segments"]:
+                                s_copy = dict(s)
+                                if dark_bg and s_copy.get("color") in (None, "0F172A", "1E293B", "334155", "000000"):
+                                    s_copy["color"] = "FFFFFF"
+                                segs.append(s_copy)
+                            mk = _segments_to_rl_markup(segs, mono_family, default_color=def_text_hex)
+                            p_align = p_info["align"]
+                            is_b = is_hdr or any(s.get("bold") for s in segs)
+                            st = ParagraphStyle(
+                                "TblCellDyn",
+                                fontName=(f"{sans_family}-Bold" if (is_b and sans_family == "VelmoSans") else sans_family),
+                                fontSize=tbl_font_pt,
+                                leading=tbl_leading,
+                                textColor=colors.HexColor(f"#{def_text_hex}"),
+                                alignment=p_align,
+                            )
+                            cell_paras.append(RLParagraph(mk, st))
+                    row_data.append(cell_paras if len(cell_paras) > 1 else (cell_paras[0] if cell_paras else ""))
                 table_data.append(row_data)
 
+            for c0, r0, c1, r1 in span_cmds:
+                ts_cmds.append(("SPAN", (c0, r0), (c1, r1)))
+
             if table_data:
-                rl_table = RLTable(table_data)
-                rl_table.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    ('TOPPADDING', (0, 0), (-1, -1), 4),
-                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 6),
-                    ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-                ]))
+                rl_table = RLTable(
+                    table_data,
+                    colWidths=col_widths,
+                    repeatRows=repeat_hdr_rows if len(table_data) > repeat_hdr_rows else 0,
+                    splitByRow=1,
+                )
+                rl_table.setStyle(TableStyle(ts_cmds))
                 story.append(rl_table)
-                story.append(Spacer(1, 10))
+                story.append(Spacer(1, 7))
 
     if not story:
         story.append(RLParagraph("Empty Document", body_style))
 
-    pdf_doc.build(story)
-    return buffer.getvalue()
+    try:
+        pdf_doc.build(story, canvasmaker=_VelmoNumberedCanvas)
+        return buffer.getvalue()
+    finally:
+        keepalive_bufs.clear()
+        story.clear()
+        gc.collect()
 
 
 def xlsx_to_pdf(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
@@ -1722,70 +2645,472 @@ def _pptx_to_pdf_reportlab(pptx_bytes: bytes) -> bytes:
     return buffer.getvalue()
 
 
+def _estimate_textbox_height_in(lines_info: List[Tuple[str, float]], width_in: float) -> float:
+    """Estimates vertical height (inches) needed by wrapped paragraphs inside a PPTX textbox."""
+    total_h = 0.10
+    for text, pt in lines_info:
+        chars_per_line = max(int(width_in * 10.2 * (12.0 / max(pt, 7.0))), 24)
+        sub_lines = text.split("\n")
+        wrapped = 0
+        for sl in sub_lines:
+            wrapped += max(1, (len(sl) + chars_per_line - 1) // chars_per_line)
+        line_h_in = (pt * 1.35) / 72.0
+        total_h += wrapped * line_h_in + (pt * 0.45) / 72.0
+    return total_h
+
+
+def _render_styled_pptx_table_slice(
+    slide,
+    raw_rows_slice: List[List[Optional[dict]]],
+    span_cmds_slice: List[Tuple[int, int, int, int]],
+    repeat_hdr_rows: int,
+    left,
+    top,
+    width,
+    max_height,
+    col_weights: List[float],
+) -> int:
+    """Renders a slice of a DOCX table onto a PPTX slide with proportional widths, merges, and fills."""
+    n_r = len(raw_rows_slice)
+    n_c = len(raw_rows_slice[0]) if n_r else 0
+    if n_r == 0 or n_c == 0:
+        return 0
+
+    if n_c >= 10:
+        font_pt = 8.0
+    elif n_c >= 8:
+        font_pt = 8.5
+    elif n_r > 12:
+        font_pt = 8.8
+    else:
+        font_pt = 9.8
+
+    # Estimate required height per row based on wrapped text lines
+    total_w_in = width / Inches(1)
+    sum_wt = max(sum(col_weights), 1.0)
+    col_widths_in = [total_w_in * (w / sum_wt) for w in col_weights]
+
+    row_heights_in: List[float] = []
+    for r in raw_rows_slice:
+        max_lines = 1
+        for c_i, cell in enumerate(r):
+            if not cell or not cell["is_origin"]:
+                continue
+            txt = " ".join(p["plain_text"].strip() for p in cell["paras"] if p["plain_text"].strip())
+            cw_in = max(col_widths_in[c_i] - 0.12, 0.35)
+            cpl = max(int(cw_in * 10.0 * (12.0 / font_pt)), 6)
+            lines_needed = max(1, (len(txt) + cpl - 1) // cpl)
+            max_lines = max(max_lines, lines_needed)
+        rh = max(0.26, max_lines * ((font_pt * 1.35) / 72.0) + 0.10)
+        row_heights_in.append(rh)
+
+    est_h = min(max_height, Inches(sum(row_heights_in)))
+    shape = slide.shapes.add_table(n_r, n_c, left, top, width, est_h)
+    tbl = shape.table
+
+    for c_i, cw_in in enumerate(col_widths_in):
+        tbl.columns[c_i].width = Inches(cw_in)
+    scale_h = min(1.0, (max_height / Inches(1)) / max(sum(row_heights_in), 0.1))
+    for r_i, rh in enumerate(row_heights_in):
+        tbl.rows[r_i].height = Inches(max(0.22, rh * scale_h))
+
+    for r_i, row in enumerate(raw_rows_slice):
+        is_hdr = r_i < repeat_hdr_rows
+        for c_i, cell_info in enumerate(row):
+            pptx_cell = tbl.cell(r_i, c_i)
+            pptx_cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            pptx_cell.margin_top = Pt(1.5)
+            pptx_cell.margin_bottom = Pt(1.5)
+            pptx_cell.margin_left = Pt(3)
+            pptx_cell.margin_right = Pt(3)
+
+            fill_hex = (cell_info.get("fill") if cell_info else None) or (
+                "0F172A" if is_hdr else ("F8FAFC" if r_i % 2 == 1 else "FFFFFF")
+            )
+            dark_bg = _is_dark_hex(fill_hex)
+            pptx_cell.fill.solid()
+            pptx_cell.fill.fore_color.rgb = RGBColor(
+                int(fill_hex[0:2], 16), int(fill_hex[2:4], 16), int(fill_hex[4:6], 16)
+            )
+
+            if not cell_info or not cell_info["is_origin"]:
+                pptx_cell.text = ""
+                continue
+
+            txt = "\n".join(
+                p["plain_text"].strip() for p in cell_info["paras"] if p["plain_text"].strip()
+            ).strip()
+            pptx_cell.text = txt
+            is_bold = is_hdr or any(
+                s.get("bold") for p in cell_info["paras"] for s in p["segments"]
+            )
+            fg = RGBColor(255, 255, 255) if dark_bg else RGBColor(15, 23, 42)
+            for p in pptx_cell.text_frame.paragraphs:
+                p.font.size = Pt(font_pt)
+                p.font.bold = is_bold
+                p.font.color.rgb = fg
+
+    for c0, r0, c1, r1 in span_cmds_slice:
+        try:
+            tbl.cell(r0, c0).merge(tbl.cell(r1, c1))
+        except Exception:
+            pass
+
+    return int(shape.height)
+
+
 def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Creates PowerPoint slides from Word headings, paragraphs, and tables."""
+    """Creates clean, non-overlapping widescreen PowerPoint slides from Word headings, prose, lists, code blocks, images, and tables."""
     doc = Document(io.BytesIO(docx_bytes))
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
 
-    current_slide = None
-    slide_count = 0
-    tx_box = None
-    tf = None
+    margin_x_in = 0.55
+    content_w_in = 12.23
+    top_body_in = 1.05
+    max_y_in = 7.08
 
-    def start_new_slide(title="Slide"):
-        nonlocal current_slide, slide_count, tx_box, tf
+    current_slide = None
+    current_title_shape = None
+    slide_count = 0
+    current_title = "Document Overview"
+    cur_y_in = top_body_in
+    slide_has_table_or_img = False
+    para_buffer: List[dict] = []
+    list_counters: Dict[Tuple[str, int], int] = {}
+
+    def start_new_slide(title: str = "Slide", flush: bool = True):
+        nonlocal current_slide, current_title_shape, slide_count, current_title, cur_y_in, slide_has_table_or_img
+        if flush:
+            flush_para_buffer()
         current_slide = prs.slides.add_slide(blank_layout)
         slide_count += 1
-        t_box = current_slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(1.0))
+        current_title = title.strip() or f"Slide {slide_count}"
+        slide_has_table_or_img = False
+
+        t_box = current_slide.shapes.add_textbox(
+            Inches(margin_x_in), Inches(0.30), Inches(content_w_in), Inches(0.65)
+        )
+        current_title_shape = t_box
+        t_box.text_frame.word_wrap = True
         p = t_box.text_frame.paragraphs[0]
-        p.text = title
-        p.font.size = Pt(28)
+        p.text = current_title[:120]
+        p.font.size = Pt(22 if len(current_title) < 60 else 18)
         p.font.bold = True
         p.font.color.rgb = RGBColor(15, 23, 42)
+        cur_y_in = top_body_in
 
-        tx_box = current_slide.shapes.add_textbox(Inches(0.8), Inches(1.8), Inches(11.7), Inches(5.0))
-        tf = tx_box.text_frame
-        tf.word_wrap = True
+    def flush_para_buffer():
+        nonlocal cur_y_in, current_slide
+        if not para_buffer:
+            return
+        if current_slide is None:
+            start_new_slide(current_title, flush=False)
+
+        idx = 0
+        while idx < len(para_buffer):
+            avail_h_in = max_y_in - cur_y_in
+            if avail_h_in < 0.75:
+                start_new_slide(f"{current_title} (cont.)" if "(cont.)" not in current_title else current_title, flush=False)
+                avail_h_in = max_y_in - cur_y_in
+
+            # Group contiguous items of same box type (plain vs code/callout) that fit into avail_h_in
+            first = para_buffer[idx]
+            is_box = first["kind"] in ("code", "callout")
+            chunk: List[dict] = []
+            used_h = 0.12
+
+            while idx < len(para_buffer):
+                item = para_buffer[idx]
+                item_is_box = item["kind"] in ("code", "callout")
+                if chunk and (is_box != item_is_box):
+                    break
+                item_h = _estimate_textbox_height_in([(item["text"], item["pt"])], content_w_in - (0.3 if item_is_box else 0.0))
+                if chunk and used_h + item_h > avail_h_in:
+                    break
+                chunk.append(item)
+                used_h += item_h
+                idx += 1
+                if item_is_box:
+                    break
+
+            box_h_in = min(max(used_h + 0.08, 0.38), avail_h_in)
+            tb = current_slide.shapes.add_textbox(
+                Inches(margin_x_in), Inches(cur_y_in), Inches(content_w_in), Inches(box_h_in)
+            )
+            tf = tb.text_frame
+            tf.word_wrap = True
+            tf.margin_top = Pt(3)
+            tf.margin_bottom = Pt(3)
+            tf.margin_left = Pt(6 if is_box else 2)
+            tf.margin_right = Pt(6 if is_box else 2)
+
+            if is_box:
+                bg_hex = first.get("bg") or ("F1F5F9" if first["kind"] == "code" else "EFF6FF")
+                tb.fill.solid()
+                tb.fill.fore_color.rgb = RGBColor(int(bg_hex[0:2], 16), int(bg_hex[2:4], 16), int(bg_hex[4:6], 16))
+
+            for p_i, item in enumerate(chunk):
+                p = tf.paragraphs[0] if p_i == 0 else tf.add_paragraph()
+                p.space_after = Pt(4)
+                p.level = item.get("level", 0)
+                if item.get("prefix"):
+                    r_pre = p.add_run()
+                    r_pre.text = item["prefix"]
+                    r_pre.font.size = Pt(item["pt"])
+                    r_pre.font.bold = True
+                    r_pre.font.color.rgb = RGBColor(30, 41, 59)
+
+                for seg in item["segments"]:
+                    if not seg["text"]:
+                        continue
+                    r = p.add_run()
+                    r.text = seg["text"]
+                    r.font.size = Pt(item["pt"])
+                    r.font.bold = bool(item.get("bold") or seg.get("bold"))
+                    r.font.italic = bool(seg.get("italic"))
+                    if item["kind"] == "code" or seg.get("mono"):
+                        r.font.name = "Consolas"
+                    if seg.get("url"):
+                        r.hyperlink.address = seg["url"]
+                        r.font.color.rgb = RGBColor(37, 99, 235)
+                        r.font.underline = True
+                    elif seg.get("color") and seg["color"] not in ("000000", "AUTO"):
+                        hx = seg["color"]
+                        r.font.color.rgb = RGBColor(int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+                    else:
+                        r.font.color.rgb = RGBColor(15, 23, 42) if item.get("bold") else RGBColor(51, 65, 85)
+
+            cur_y_in += box_h_in + 0.08
+
+        para_buffer.clear()
 
     for child in doc.element.body.iterchildren():
         if child.tag.endswith('p'):
-            p = Paragraph(child, doc)
-            text = p.text.strip()
-            if not text:
-                continue
-            is_heading = p.style.name.startswith("Heading") or (any(r.bold for r in p.runs) and len(text) < 70)
-            if is_heading or current_slide is None:
-                start_new_slide(text if is_heading else "Introduction")
-                if not is_heading and tf:
-                    para = tf.add_paragraph()
-                    para.text = text
-                    para.font.size = Pt(14)
-            else:
-                if tf:
-                    para = tf.add_paragraph()
-                    para.text = text
-                    para.font.size = Pt(14)
-                    para.font.color.rgb = RGBColor(51, 65, 85)
+            info = _extract_oxml_paragraph_data(child, doc)
+            text = info["plain_text"].strip()
+
+            if info["page_break_before"] and current_slide is not None:
+                start_new_slide(current_title)
+
+            # Handle embedded images in paragraph
+            for rid, cx_pt, cy_pt in info["images"]:
+                rel_part = doc.part.related_parts.get(rid)
+                if rel_part is None:
+                    continue
+                flush_para_buffer()
+                if current_slide is None:
+                    start_new_slide(current_title)
+                avail_h_in = max_y_in - cur_y_in
+                if avail_h_in < 2.2 or slide_has_table_or_img:
+                    start_new_slide(current_title)
+                    avail_h_in = max_y_in - cur_y_in
+
+                try:
+                    flat_bytes, iw, ih = _flatten_image_for_reportlab(rel_part.blob)
+                    target_w_in = (cx_pt / 72.0) if cx_pt else content_w_in * 0.8
+                    target_h_in = (cy_pt / 72.0) if cy_pt else target_w_in * (ih / iw)
+                    scale = min(content_w_in / max(target_w_in, 0.1), avail_h_in / max(target_h_in, 0.1), 1.35)
+                    # Cap upscaling so small logos stay crisp and large plates fit
+                    if target_h_in * scale > avail_h_in:
+                        scale = avail_h_in / max(target_h_in, 0.1)
+                    if target_w_in * scale > content_w_in:
+                        scale = content_w_in / max(target_w_in, 0.1)
+                    box_w = Inches(min(content_w_in, max(target_w_in * scale, 1.0)))
+                    box_h = Inches(min(avail_h_in, max(target_h_in * scale, 0.7)))
+                    box_left = Inches(margin_x_in) + int((Inches(content_w_in) - box_w) / 2)
+                    _add_aspect_fit_picture(current_slide, flat_bytes, box_left, Inches(cur_y_in), box_w, box_h)
+                    cur_y_in += (box_h / Inches(1)) + 0.10
+                    slide_has_table_or_img = True
+                except Exception as img_err:
+                    logger.warning(f"DOCX->PPTX image render failed for {rid}: {img_err}")
+
+            if text:
+                hl = info["heading_level"]
+                if hl == 1:
+                    if current_slide is not None and (cur_y_in > top_body_in + 0.05 or para_buffer or slide_has_table_or_img):
+                        start_new_slide(text)
+                    else:
+                        if current_slide is None:
+                            start_new_slide(text)
+                        else:
+                            # Replace empty slide title
+                            current_title = text
+                            if current_title_shape is not None:
+                                current_title_shape.text_frame.paragraphs[0].text = text[:120]
+                elif hl == 2:
+                    flush_para_buffer()
+                    if current_slide is None or cur_y_in > 2.35 or slide_has_table_or_img:
+                        start_new_slide(text)
+                    else:
+                        para_buffer.append({
+                            "kind": "heading",
+                            "text": text,
+                            "segments": info["segments"],
+                            "pt": 15.0,
+                            "bold": True,
+                            "level": 0,
+                        })
+                elif hl >= 3:
+                    para_buffer.append({
+                        "kind": "heading",
+                        "text": text,
+                        "segments": info["segments"],
+                        "pt": 13.0 if hl == 3 else 11.5,
+                        "bold": True,
+                        "level": 0,
+                    })
+                elif info["is_mono_block"]:
+                    para_buffer.append({
+                        "kind": "code",
+                        "text": info["plain_text"].strip("\n"),
+                        "segments": info["segments"],
+                        "pt": 9.5,
+                        "bold": False,
+                        "bg": "F1F5F9",
+                    })
+                elif info["is_callout"]:
+                    para_buffer.append({
+                        "kind": "callout",
+                        "text": text,
+                        "segments": info["segments"],
+                        "pt": 11.0,
+                        "bold": False,
+                        "bg": info["callout_bg"] or "EFF6FF",
+                    })
+                elif info["list_info"] is not None:
+                    li = info["list_info"]
+                    ilvl = li["ilvl"]
+                    if li["ordered"]:
+                        key = (li["num_id"], ilvl)
+                        list_counters[key] = list_counters.get(key, 0) + 1
+                        prefix = f"{list_counters[key]}. "
+                    else:
+                        prefix = "• " if ilvl == 0 else ("◦ " if ilvl == 1 else "▪ ")
+                    para_buffer.append({
+                        "kind": "list",
+                        "text": text,
+                        "segments": info["segments"],
+                        "prefix": prefix,
+                        "pt": 11.5,
+                        "bold": False,
+                        "level": min(ilvl, 2),
+                    })
+                else:
+                    para_buffer.append({
+                        "kind": "body",
+                        "text": text,
+                        "segments": info["segments"],
+                        "pt": 11.5,
+                        "bold": False,
+                        "level": 0,
+                    })
+
+            if (info["inline_page_breaks"] > 0 or info["has_section_break"]) and current_slide is not None:
+                flush_para_buffer()
+                # Prepare cleanly for next slide only if more content follows
+                current_slide = None
 
         elif child.tag.endswith('tbl'):
+            flush_para_buffer()
             tbl = Table(child, doc)
+            raw_rows, span_cmds, repeat_hdr_rows, grid_widths = _extract_docx_table_grid_and_spans(tbl, doc)
+            if not raw_rows:
+                continue
+
             if current_slide is None:
-                start_new_slide("Data Table")
-            num_rows = len(tbl.rows)
-            num_cols = len(tbl.columns)
-            if num_rows > 0 and num_cols > 0:
-                top_pos = Inches(2.0)
-                shape = current_slide.shapes.add_table(num_rows, num_cols, Inches(0.8), top_pos, Inches(11.7), Inches(min(num_rows * 0.4 + 0.5, 4.8)))
-                pptx_tbl = shape.table
-                for r_i, row in enumerate(tbl.rows):
-                    for c_i, cell in enumerate(row.cells):
-                        c_cell = pptx_tbl.cell(r_i, c_i)
-                        c_cell.text = cell.text.strip()
-                        if r_i == 0 and c_cell.text_frame.paragraphs:
-                            c_cell.text_frame.paragraphs[0].font.bold = True
+                start_new_slide(current_title)
+
+            avail_h_in = max_y_in - cur_y_in
+            if avail_h_in < 1.8 or slide_has_table_or_img:
+                start_new_slide(current_title)
+                avail_h_in = max_y_in - cur_y_in
+
+            num_cols = len(raw_rows[0])
+            col_weights = []
+            for c_i in range(num_cols):
+                max_len = 4
+                for r in raw_rows:
+                    c = r[c_i]
+                    if c and c["is_origin"] and c["grid_span"] == 1:
+                        t = " ".join(p["plain_text"].strip() for p in c["paras"]).strip()
+                        max_len = max(max_len, min(len(t), 34))
+                if len(grid_widths) == num_cols and grid_widths[c_i] > 0:
+                    col_weights.append(0.6 * max_len + 0.4 * (grid_widths[c_i] / 6.0))
+                else:
+                    col_weights.append(float(max_len))
+
+            # Paginate tall tables cleanly across slides (e.g., 38-row register tables)
+            hdr_slice = raw_rows[:repeat_hdr_rows] if repeat_hdr_rows > 0 else []
+            data_rows = raw_rows[repeat_hdr_rows:] if repeat_hdr_rows > 0 else raw_rows
+            hdr_spans = [(c0, r0, c1, r1) for (c0, r0, c1, r1) in span_cmds if r1 < repeat_hdr_rows]
+
+            if not data_rows:
+                data_rows = raw_rows
+                hdr_slice = []
+                hdr_spans = []
+                effective_hdr_cnt = 0
+            else:
+                effective_hdr_cnt = len(hdr_slice)
+
+            max_data_per_slide = 11 if num_cols <= 7 else 10
+            if len(data_rows) <= max_data_per_slide + 2:
+                # Single table slide
+                if avail_h_in < min(max_y_in - top_body_in, len(raw_rows) * 0.34 + 0.3) and cur_y_in > top_body_in + 0.5:
+                    start_new_slide(current_title)
+                    avail_h_in = max_y_in - cur_y_in
+                actual_h_emu = _render_styled_pptx_table_slice(
+                    current_slide,
+                    raw_rows,
+                    span_cmds,
+                    effective_hdr_cnt,
+                    Inches(margin_x_in),
+                    Inches(cur_y_in),
+                    Inches(content_w_in),
+                    Inches(avail_h_in),
+                    col_weights,
+                )
+                cur_y_in += (actual_h_emu / Inches(1)) + 0.14
+                slide_has_table_or_img = True
+            else:
+                # Split across slides with repeating headers
+                base_title = current_title
+                start_idx = 0
+                part_no = 1
+                while start_idx < len(data_rows):
+                    if part_no > 1 or avail_h_in < 3.5:
+                        title_lbl = base_title if part_no == 1 else f"{base_title} (Part {part_no})"
+                        start_new_slide(title_lbl)
+                        avail_h_in = max_y_in - cur_y_in
+                    end_idx = min(start_idx + max_data_per_slide, len(data_rows))
+                    chunk_rows = hdr_slice + data_rows[start_idx:end_idx]
+                    chunk_spans = list(hdr_spans)
+                    # Include spans wholly inside [start_idx, end_idx)
+                    orig_start = effective_hdr_cnt + start_idx
+                    orig_end = effective_hdr_cnt + end_idx - 1
+                    for c0, r0, c1, r1 in span_cmds:
+                        if r0 >= orig_start and r1 <= orig_end:
+                            chunk_spans.append((c0, r0 - start_idx, c1, r1 - start_idx))
+
+                    actual_h_emu = _render_styled_pptx_table_slice(
+                        current_slide,
+                        chunk_rows,
+                        chunk_spans,
+                        effective_hdr_cnt,
+                        Inches(margin_x_in),
+                        Inches(cur_y_in),
+                        Inches(content_w_in),
+                        Inches(avail_h_in),
+                        col_weights,
+                    )
+                    cur_y_in += (actual_h_emu / Inches(1)) + 0.14
+                    slide_has_table_or_img = True
+                    start_idx = end_idx
+                    part_no += 1
+
+    flush_para_buffer()
 
     if slide_count == 0:
         start_new_slide("Document Content")
@@ -2284,6 +3609,117 @@ def html_to_docx(html_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
 
 # --- Any Format → Text / Markdown / HTML Exporters ---
 
+def _segments_to_txt(segments: List[Dict[str, Any]]) -> str:
+    """Renders paragraph segments to plain text, preserving link URLs inline as 'anchor (url)'."""
+    merged: List[Dict[str, Any]] = []
+    for seg in segments:
+        txt = seg.get("text", "")
+        if not txt:
+            continue
+        if merged and seg.get("url") is not None and merged[-1].get("url") == seg.get("url"):
+            merged[-1]["text"] += txt
+        else:
+            merged.append(dict(seg))
+
+    out: List[str] = []
+    for seg in merged:
+        raw = seg["text"]
+        if seg.get("url"):
+            lbl = raw.strip()
+            lead = raw[: len(raw) - len(raw.lstrip())]
+            trail = raw[len(raw.rstrip()):]
+            if lbl and seg["url"] not in lbl:
+                out.append(f"{lead}{lbl} ({seg['url']}){trail}")
+            else:
+                out.append(raw)
+        else:
+            out.append(raw)
+    return "".join(out)
+
+
+def _docx_to_txt(docx_bytes: bytes) -> str:
+    """Extracts clean, reading-order plain text from a DOCX file including headers, links, lists, and tables."""
+    doc = Document(io.BytesIO(docx_bytes))
+    parts: List[str] = []
+    list_counters: Dict[Tuple[str, int], int] = {}
+
+    # Collect unique non-empty headers
+    seen_hf: Set[str] = set()
+    for sec in doc.sections:
+        if sec.header:
+            for p in sec.header.paragraphs:
+                t = _extract_oxml_paragraph_data(p._p, doc)["plain_text"].strip()
+                t = re.sub(r"__VELMO_(?:PAGE|NUMPAGES)__", "", t).strip(" |\t-")
+                if t and t not in seen_hf:
+                    seen_hf.add(t)
+                    parts.append(t)
+                    parts.append("=" * min(len(t), 72))
+
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith('p'):
+            info = _extract_oxml_paragraph_data(child, doc)
+            plain = info["plain_text"].strip()
+            if info["page_break_before"] and parts:
+                parts.append("\n" + "-" * 40)
+
+            if plain:
+                txt_line = _segments_to_txt(info["segments"]).strip()
+                if info["heading_level"] > 0:
+                    parts.append(f"\n{txt_line}")
+                elif info["is_mono_block"]:
+                    parts.append("\n" + info["plain_text"].strip("\n") + "\n")
+                elif info["list_info"] is not None:
+                    li = info["list_info"]
+                    ilvl = li["ilvl"]
+                    indent = "  " * ilvl
+                    if li["ordered"]:
+                        key = (li["num_id"], ilvl)
+                        list_counters[key] = list_counters.get(key, 0) + 1
+                        parts.append(f"{indent}{list_counters[key]}. {txt_line}")
+                    else:
+                        parts.append(f"{indent}- {txt_line}")
+                else:
+                    parts.append(txt_line)
+
+            if info["inline_page_breaks"] > 0 or info["has_section_break"]:
+                parts.append("-" * 40)
+
+        elif child.tag.endswith('tbl'):
+            tbl = Table(child, doc)
+            raw_rows, _, _, _ = _extract_docx_table_grid_and_spans(tbl, doc)
+            if raw_rows:
+                parts.append("")
+                for r in raw_rows:
+                    row_vals = []
+                    for c in r:
+                        if not c or not c["is_origin"]:
+                            row_vals.append("")
+                        else:
+                            c_txt = " ".join(
+                                _segments_to_txt(p["segments"]).strip()
+                                for p in c["paras"]
+                                if p["plain_text"].strip()
+                            ).strip()
+                            row_vals.append(re.sub(r"\s*\n\s*", " ", c_txt))
+                    while row_vals and row_vals[-1] == "":
+                        row_vals.pop()
+                    if row_vals:
+                        parts.append("\t".join(row_vals))
+                parts.append("")
+
+    for sec in doc.sections:
+        if sec.footer:
+            for p in sec.footer.paragraphs:
+                t = _extract_oxml_paragraph_data(p._p, doc)["plain_text"].strip()
+                t = re.sub(r"Page\s*__VELMO_PAGE__\s*of\s*__VELMO_NUMPAGES__", "", t, flags=re.I)
+                t = re.sub(r"__VELMO_(?:PAGE|NUMPAGES)__", "", t).strip(" |\t")
+                if t and t not in seen_hf:
+                    seen_hf.add(t)
+                    parts.append(f"\n[{t}]")
+
+    return "\n".join(parts).strip() + "\n"
+
+
 def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Extracts clean plain text from any format (running OCR if input is an image)."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -2324,12 +3760,7 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
             _release_pdf_memory()
 
     elif input_fmt == "docx":
-        doc = Document(io.BytesIO(data_bytes))
-        parts = [p.text for p in doc.paragraphs if p.text.strip()]
-        for tbl in doc.tables:
-            for r in tbl.rows:
-                parts.append("\t".join(c.text.strip() for c in r.cells))
-        text = "\n".join(parts)
+        text = _docx_to_txt(data_bytes)
 
     elif input_fmt in ("xlsx", "csv"):
         if input_fmt == "csv":
@@ -2703,6 +4134,154 @@ def pdf_to_md(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
         _release_pdf_memory()
 
 
+def _segments_to_md(segments: List[Dict[str, Any]], include_inline_styles: bool = True) -> str:
+    """Renders extracted paragraph segments to clean Markdown with [anchor](url) links and inline styles."""
+    merged: List[Dict[str, Any]] = []
+    for seg in segments:
+        txt = seg.get("text", "")
+        if not txt:
+            continue
+        if (
+            merged
+            and seg.get("url") is not None
+            and merged[-1].get("url") == seg.get("url")
+        ):
+            merged[-1]["text"] += txt
+        elif (
+            merged
+            and seg.get("url") is None
+            and merged[-1].get("url") is None
+            and merged[-1].get("bold") == seg.get("bold")
+            and merged[-1].get("italic") == seg.get("italic")
+            and merged[-1].get("mono") == seg.get("mono")
+        ):
+            merged[-1]["text"] += txt
+        else:
+            merged.append(dict(seg))
+
+    out: List[str] = []
+    for seg in merged:
+        raw = seg["text"]
+        if seg.get("url"):
+            lbl = raw.strip()
+            lead = raw[: len(raw) - len(raw.lstrip())]
+            trail = raw[len(raw.rstrip()):]
+            if lbl:
+                out.append(f"{lead}[{lbl}]({seg['url']}){trail}")
+            else:
+                out.append(raw)
+            continue
+
+        if not include_inline_styles:
+            out.append(raw)
+            continue
+
+        core = raw.strip()
+        if not core:
+            out.append(raw)
+            continue
+        lead = raw[: len(raw) - len(raw.lstrip())]
+        trail = raw[len(raw.rstrip()):]
+
+        if seg.get("mono"):
+            formatted = f"`{core}`"
+        elif seg.get("bold") and seg.get("italic"):
+            formatted = f"***{core}***"
+        elif seg.get("bold"):
+            formatted = f"**{core}**"
+        elif seg.get("italic"):
+            formatted = f"*{core}*"
+        else:
+            formatted = core
+        out.append(f"{lead}{formatted}{trail}")
+
+    return "".join(out)
+
+
+def _docx_to_md(docx_bytes: bytes) -> str:
+    """Converts a DOCX file to structured GFM Markdown preserving H1-H6, lists, code blocks, callouts, links, and tables."""
+    doc = Document(io.BytesIO(docx_bytes))
+    parts: List[str] = []
+    list_counters: Dict[Tuple[str, int], int] = {}
+    in_list_block = False
+
+    def close_list_block():
+        nonlocal in_list_block
+        if in_list_block:
+            parts.append("")
+            in_list_block = False
+
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith('p'):
+            info = _extract_oxml_paragraph_data(child, doc)
+            plain = info["plain_text"].strip()
+
+            if info["page_break_before"] and parts:
+                close_list_block()
+                parts.append("---\n")
+
+            if plain:
+                hl = info["heading_level"]
+                if hl > 0:
+                    close_list_block()
+                    h_md = _segments_to_md(info["segments"], include_inline_styles=False).strip()
+                    parts.append(f"{'#' * min(hl, 6)} {h_md}\n")
+                elif info["is_mono_block"]:
+                    close_list_block()
+                    code_txt = info["plain_text"].strip("\n")
+                    parts.append(f"```\n{code_txt}\n```\n")
+                elif info["is_callout"]:
+                    close_list_block()
+                    q_md = _segments_to_md(info["segments"], include_inline_styles=True).strip()
+                    q_lines = "\n".join(f"> {ln}" if ln.strip() else ">" for ln in q_md.splitlines())
+                    parts.append(f"{q_lines}\n")
+                elif info["list_info"] is not None:
+                    li = info["list_info"]
+                    ilvl = li["ilvl"]
+                    indent = "  " * ilvl
+                    item_md = _segments_to_md(info["segments"], include_inline_styles=True).strip()
+                    if li["ordered"]:
+                        key = (li["num_id"], ilvl)
+                        list_counters[key] = list_counters.get(key, 0) + 1
+                        parts.append(f"{indent}{list_counters[key]}. {item_md}")
+                    else:
+                        parts.append(f"{indent}- {item_md}")
+                    in_list_block = True
+                else:
+                    close_list_block()
+                    p_md = _segments_to_md(info["segments"], include_inline_styles=True).strip()
+                    parts.append(f"{p_md}\n")
+
+            if info["inline_page_breaks"] > 0 or info["has_section_break"]:
+                close_list_block()
+                if parts and not parts[-1].endswith("---\n"):
+                    parts.append("---\n")
+
+        elif child.tag.endswith('tbl'):
+            close_list_block()
+            tbl = Table(child, doc)
+            raw_rows, _, _, _ = _extract_docx_table_grid_and_spans(tbl, doc)
+            if raw_rows:
+                rows_grid = []
+                for r in raw_rows:
+                    row_strs = []
+                    for c in r:
+                        if not c or not c["is_origin"]:
+                            row_strs.append("")
+                        else:
+                            cell_md = " ".join(
+                                _segments_to_md(p["segments"], include_inline_styles=False).strip()
+                                for p in c["paras"]
+                                if p["plain_text"].strip()
+                            ).strip()
+                            row_strs.append(cell_md)
+                    rows_grid.append(row_strs)
+                parts.append(_format_md_table(rows_grid) + "\n")
+
+    close_list_block()
+    return "\n".join(parts).strip() + "\n"
+
+
 def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates structured Markdown from any document."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -2713,28 +4292,7 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
         md_text = f"# OCR Extracted Content: {base_name}\n\n" + "\n\n".join(it['text'] for it in items)
 
     elif input_fmt == "docx":
-        doc = Document(io.BytesIO(data_bytes))
-        parts = []
-        for child in doc.element.body.iterchildren():
-            if child.tag.endswith('p'):
-                p = Paragraph(child, doc)
-                t = p.text.strip()
-                if not t:
-                    continue
-                if p.style.name.startswith("Heading 1"):
-                    parts.append(f"# {t}\n")
-                elif p.style.name.startswith("Heading 2"):
-                    parts.append(f"## {t}\n")
-                elif p.style.name.startswith("Heading"):
-                    parts.append(f"### {t}\n")
-                else:
-                    parts.append(f"{t}\n")
-            elif child.tag.endswith('tbl'):
-                tbl = Table(child, doc)
-                if tbl.rows:
-                    rows_grid = [[c.text.strip() for c in row.cells] for row in tbl.rows]
-                    parts.append(_format_md_table(rows_grid) + "\n")
-        md_text = "\n".join(parts)
+        md_text = _docx_to_md(data_bytes)
 
     elif input_fmt in ("xlsx", "csv"):
         if input_fmt == "csv":
@@ -2765,10 +4323,225 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
     return md_text.encode("utf-8"), "text/markdown; charset=utf-8", f"{base_name}.md", 1
 
 
+def _segments_to_html(segments: List[Dict[str, Any]], include_inline_styles: bool = True) -> str:
+    """Renders paragraph segments to clean HTML5 inline markup with clickable links, colors, bold/italic/underline/code."""
+    merged: List[Dict[str, Any]] = []
+    for seg in segments:
+        txt = seg.get("text", "")
+        if not txt:
+            continue
+        if (
+            merged
+            and seg.get("url") is not None
+            and merged[-1].get("url") == seg.get("url")
+            and merged[-1].get("bold") == seg.get("bold")
+            and merged[-1].get("italic") == seg.get("italic")
+        ):
+            merged[-1]["text"] += txt
+        else:
+            merged.append(dict(seg))
+
+    out: List[str] = []
+    for seg in merged:
+        esc = html.escape(seg["text"]).replace("\n", "<br>")
+        if seg.get("url"):
+            esc_url = html.escape(seg["url"], quote=True)
+            out.append(f'<a href="{esc_url}" target="_blank" rel="noopener">{esc}</a>')
+            continue
+
+        if not include_inline_styles:
+            out.append(esc)
+            continue
+
+        if seg.get("mono"):
+            esc = f"<code>{esc}</code>"
+        if seg.get("bold"):
+            esc = f"<strong>{esc}</strong>"
+        if seg.get("italic"):
+            esc = f"<em>{esc}</em>"
+        if seg.get("underline"):
+            esc = f"<u>{esc}</u>"
+        col = seg.get("color")
+        if col and col.upper() not in ("000000", "AUTO"):
+            esc = f'<span style="color:#{html.escape(col)};">{esc}</span>'
+        out.append(esc)
+    return "".join(out)
+
+
+def _docx_to_html_body(docx_bytes: bytes) -> str:
+    """Converts a DOCX file into rich responsive HTML5 body content including embedded images, merges, lists, code, callouts, and links."""
+    doc = Document(io.BytesIO(docx_bytes))
+    parts: List[str] = []
+    list_stack: List[Tuple[str, int]] = []
+
+    def close_lists(target_level: int = -1, next_tag: Optional[str] = None):
+        while list_stack:
+            top_tag, top_lvl = list_stack[-1]
+            if top_lvl > target_level or (top_lvl == target_level and next_tag is not None and top_tag != next_tag):
+                parts.append(f"</{top_tag}>")
+                list_stack.pop()
+            else:
+                break
+
+    # Optional running header banner
+    seen_hf: Set[str] = set()
+    for sec in doc.sections:
+        if sec.header:
+            for p in sec.header.paragraphs:
+                t = _extract_oxml_paragraph_data(p._p, doc)["plain_text"].strip()
+                if t and t not in seen_hf:
+                    seen_hf.add(t)
+                    parts.append(f'<div class="doc-header">{html.escape(t)}</div>')
+
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith('p'):
+            info = _extract_oxml_paragraph_data(child, doc)
+            if info["page_break_before"] and parts:
+                close_lists()
+                parts.append('<hr class="page-break">')
+
+            # Embedded images inside paragraph
+            for rid, cx_pt, cy_pt in info["images"]:
+                rel_part = doc.part.related_parts.get(rid)
+                if rel_part is None:
+                    continue
+                close_lists()
+                try:
+                    raw_blob = rel_part.blob
+                    with Image.open(io.BytesIO(raw_blob)) as im:
+                        fmt = (im.format or "").upper()
+                        mode = im.mode
+                        has_alpha = mode in ("RGBA", "LA") or (mode == "P" and "transparency" in im.info)
+                    if fmt == "JPEG" and not has_alpha:
+                        mime = "image/jpeg"
+                        img_out = raw_blob
+                    else:
+                        img_out, _, _ = _flatten_image_for_reportlab(raw_blob)
+                        mime = "image/png"
+                    b64 = base64.b64encode(img_out).decode("ascii")
+                    max_px = int(cx_pt * 1.333) if cx_pt else 820
+                    align_cls = "center" if info["align"] == TA_CENTER else ("right" if info["align"] == TA_RIGHT else "left")
+                    parts.append(
+                        f'<figure class="doc-figure align-{align_cls}">'
+                        f'<img src="data:{mime};base64,{b64}" alt="Embedded visual" style="max-width: min(100%, {max_px}px); height: auto;">'
+                        f'</figure>'
+                    )
+                    del b64, img_out
+                except Exception as img_err:
+                    logger.warning(f"DOCX->HTML image embed failed for {rid}: {img_err}")
+
+            plain = info["plain_text"].strip()
+            if plain:
+                hl = info["heading_level"]
+                if hl > 0:
+                    close_lists()
+                    lvl = min(hl, 6)
+                    h_html = _segments_to_html(info["segments"], include_inline_styles=False).strip()
+                    parts.append(f"<h{lvl}>{h_html}</h{lvl}>")
+                elif info["is_mono_block"]:
+                    close_lists()
+                    code_esc = html.escape(info["plain_text"].strip("\n"))
+                    parts.append(f"<pre><code>{code_esc}</code></pre>")
+                elif info["is_callout"]:
+                    close_lists()
+                    bg = info["callout_bg"] or "EFF6FF"
+                    bd = info["callout_border"] or "2563EB"
+                    c_html = _segments_to_html(info["segments"], include_inline_styles=True).strip()
+                    parts.append(
+                        f'<blockquote class="doc-callout" style="background:#{html.escape(bg)}; border-left:4px solid #{html.escape(bd)};">{c_html}</blockquote>'
+                    )
+                elif info["list_info"] is not None:
+                    li = info["list_info"]
+                    tag = "ol" if li["ordered"] else "ul"
+                    ilvl = li["ilvl"]
+                    close_lists(ilvl, tag)
+                    if not list_stack or list_stack[-1][1] < ilvl:
+                        parts.append(f"<{tag}>")
+                        list_stack.append((tag, ilvl))
+                    item_html = _segments_to_html(info["segments"], include_inline_styles=True).strip()
+                    parts.append(f"<li>{item_html}</li>")
+                else:
+                    close_lists()
+                    align_style = ""
+                    if info["align"] == TA_CENTER:
+                        align_style = ' style="text-align:center;"'
+                    elif info["align"] == TA_RIGHT:
+                        align_style = ' style="text-align:right;"'
+                    p_html = _segments_to_html(info["segments"], include_inline_styles=True).strip()
+                    parts.append(f"<p{align_style}>{p_html}</p>")
+
+            if info["inline_page_breaks"] > 0 or info["has_section_break"]:
+                close_lists()
+                parts.append('<hr class="page-break">')
+
+        elif child.tag.endswith('tbl'):
+            close_lists()
+            tbl = Table(child, doc)
+            raw_rows, span_cmds, repeat_hdr_rows, _ = _extract_docx_table_grid_and_spans(tbl, doc)
+            if not raw_rows:
+                continue
+
+            span_map = {(r0, c0): (c1 - c0 + 1, r1 - r0 + 1) for c0, r0, c1, r1 in span_cmds}
+            tbl_html = ['<div class="table-wrap"><table>']
+            for r_idx, row in enumerate(raw_rows):
+                is_hdr = r_idx < max(repeat_hdr_rows, 1)
+                tbl_html.append("<tr>")
+                for c_idx, cell in enumerate(row):
+                    if not cell or not cell["is_origin"]:
+                        continue
+                    cs, rs = span_map.get((r_idx, c_idx), (1, 1))
+                    attrs = []
+                    if cs > 1:
+                        attrs.append(f'colspan="{cs}"')
+                    if rs > 1:
+                        attrs.append(f'rowspan="{rs}"')
+
+                    fill_hex = cell.get("fill") or ("0F172A" if is_hdr else ("F8FAFC" if r_idx % 2 == 1 else "FFFFFF"))
+                    dark_bg = _is_dark_hex(fill_hex)
+                    fg_hex = "FFFFFF" if dark_bg else "0F172A"
+                    attrs.append(f'style="background-color:#{html.escape(fill_hex)}; color:#{fg_hex};"')
+
+                    inner_parts = []
+                    for p_info in cell["paras"]:
+                        if p_info["plain_text"].strip():
+                            segs = []
+                            for s in p_info["segments"]:
+                                sc = dict(s)
+                                if dark_bg and sc.get("color") in (None, "0F172A", "1E293B", "334155", "000000"):
+                                    sc["color"] = "FFFFFF"
+                                segs.append(sc)
+                            inner_parts.append(_segments_to_html(segs, include_inline_styles=True).strip())
+                    cell_content = "<br>".join(inner_parts)
+                    tag = "th" if is_hdr else "td"
+                    attr_str = (" " + " ".join(attrs)) if attrs else ""
+                    tbl_html.append(f"<{tag}{attr_str}>{cell_content}</{tag}>")
+                tbl_html.append("</tr>")
+            tbl_html.append("</table></div>")
+            parts.append("".join(tbl_html))
+
+    close_lists()
+    for sec in doc.sections:
+        if sec.footer:
+            for p in sec.footer.paragraphs:
+                t = _extract_oxml_paragraph_data(p._p, doc)["plain_text"].strip()
+                t = re.sub(r"Page\s*__VELMO_PAGE__\s*of\s*__VELMO_NUMPAGES__", "", t, flags=re.I)
+                t = re.sub(r"__VELMO_(?:PAGE|NUMPAGES)__", "", t).strip(" |\t")
+                if t and t not in seen_hf:
+                    seen_hf.add(t)
+                    parts.append(f'<div class="doc-footer">{html.escape(t)}</div>')
+
+    gc.collect()
+    return "\n".join(parts)
+
+
 def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates a clean responsive HTML5 document from any file format."""
-    md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
-    body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
+    norm_fmt = input_fmt.lower().replace("jpeg", "jpg")
+    if norm_fmt == "docx":
+        body_html = _docx_to_html_body(data_bytes)
+    else:
+        md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
+        body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
 
     full_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -2776,14 +4549,25 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
   <meta charset="UTF-8">
   <title>{html.escape(base_name)}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #1e293b; }}
-    h1, h2, h3 {{ color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }}
-    table {{ border-collapse: collapse; width: 100%; margin: 20px 0; display: block; overflow-x: auto; }}
-    th, td {{ border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }}
-    th {{ background: #f1f5f9; font-weight: 600; }}
-    code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: monospace; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "DejaVu Sans", sans-serif; line-height: 1.6; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #1e293b; background: #ffffff; }}
+    h1, h2, h3, h4 {{ color: #0f172a; margin-top: 1.4em; }}
+    h1, h2 {{ border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }}
+    .doc-header, .doc-footer {{ font-size: 0.82rem; color: #64748b; padding: 8px 0; border-bottom: 1px solid #e2e8f0; margin-bottom: 18px; }}
+    .doc-footer {{ border-bottom: none; border-top: 1px solid #e2e8f0; margin-top: 28px; }}
+    .doc-figure {{ margin: 18px 0; }}
+    .doc-figure.align-center {{ text-align: center; }}
+    .doc-figure.align-right {{ text-align: right; }}
+    .doc-figure img {{ border-radius: 6px; background: #ffffff; }}
+    .doc-callout {{ margin: 14px 0; padding: 12px 16px; border-radius: 6px; color: #1e293b; }}
+    .page-break {{ border: none; border-top: 1px dashed #cbd5e1; margin: 28px 0; }}
+    .table-wrap {{ width: 100%; overflow-x: auto; margin: 18px 0; }}
+    table {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
+    th, td {{ border: 1px solid #cbd5e1; padding: 7px 10px; text-align: left; vertical-align: middle; }}
+    th {{ font-weight: 600; }}
+    code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "Consolas", "DejaVu Sans Mono", monospace; }}
     pre {{ background: #f1f5f9; padding: 14px 16px; border-radius: 6px; overflow-x: auto; border: 1px solid #e2e8f0; }}
     pre code {{ background: none; padding: 0; }}
+    a {{ color: #2563eb; text-decoration: underline; }}
   </style>
 </head>
 <body>
