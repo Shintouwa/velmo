@@ -97,8 +97,6 @@
     body {
       min-height: 100vh;
       background-color: var(--bg);
-      background-image: radial-gradient(var(--dot-color) 1px, transparent 1px);
-      background-size: 24px 24px;
       color: var(--text);
       display: flex;
       flex-direction: column;
@@ -109,6 +107,17 @@
       overflow-x: hidden;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* --- Interactive 60fps Reactive Dot-Grid Background Canvas --- */
+    #dotGridCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      pointer-events: none;
+      z-index: 0;
+      display: block;
     }
 
     /* Subtle Film Grain Overlay */
@@ -2134,61 +2143,14 @@
     }
 
     .footer-tools-link {
-      color: var(--text) !important;
-      font-weight: 650;
-      text-decoration: underline !important;
-      text-underline-offset: 3px;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.15s ease;
     }
 
     .footer-tools-link:hover {
-      color: var(--primary) !important;
-    }
-
-    /* --- Custom Spring-Lerp Cursor Follower Halo --- */
-    @media (hover: hover) and (pointer: fine) {
-      .cursor-halo {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 26px;
-        height: 26px;
-        border-radius: 50%;
-        border: 1.5px solid rgba(255, 255, 255, 0.28);
-        pointer-events: none;
-        z-index: 9999;
-        will-change: transform, width, height, border-color, box-shadow;
-        transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1),
-                    height 0.22s cubic-bezier(0.16, 1, 0.3, 1),
-                    border-color 0.22s ease,
-                    background-color 0.22s ease,
-                    box-shadow 0.22s ease,
-                    opacity 0.2s ease;
-        opacity: 0;
-      }
-      :root[data-theme="light"] .cursor-halo {
-        border-color: rgba(17, 17, 19, 0.25);
-      }
-      .cursor-halo.active {
-        opacity: 1;
-      }
-      .cursor-halo.hovering {
-        width: 44px;
-        height: 44px;
-        border-color: rgba(255, 77, 28, 0.65);
-        background-color: rgba(255, 77, 28, 0.06);
-      }
-      .cursor-halo.dropzone-hover {
-        width: 54px;
-        height: 54px;
-        border-color: #FF4D1C;
-        box-shadow: 0 0 16px rgba(255, 77, 28, 0.5);
-        background-color: rgba(255, 77, 28, 0.08);
-      }
-    }
-    @media (pointer: coarse), (hover: none), (prefers-reduced-motion: reduce) {
-      .cursor-halo {
-        display: none !important;
-      }
+      color: var(--primary);
     }
 
     /* Reduced motion override */
@@ -2203,6 +2165,9 @@
   </style>
 </head>
 <body>
+
+  <!-- Interactive 60fps Reactive Dot-Grid Background Canvas -->
+  <canvas id="dotGridCanvas" aria-hidden="true"></canvas>
 
   <!-- Top Bar -->
   <header class="top-nav">
@@ -2556,9 +2521,6 @@
   <footer class="footer">
     Built by Shintouwa &bull; <a href="https://github.com/Shintouwa/velmo" target="_blank" rel="noopener noreferrer">GitHub ↗</a> &bull; <a href="/tools" class="footer-tools-link">All 28 Converters ↗</a> &bull; No login required &bull; Unlimited conversions
   </footer>
-
-  <!-- Cursor Halo Follower Element -->
-  <div id="cursorHalo" class="cursor-halo" aria-hidden="true"></div>
 
   <script>
 
@@ -3723,63 +3685,294 @@
     hydrateSeoRouteState();
   
 
-    // --- Mouse Cursor Halo, Specular Spotlight & Magnetic Physics ---
+    // --- Interactive 60fps Reactive Dot-Grid Background (<canvas>) ---
+    (function initDotGrid() {
+      const canvas = document.getElementById('dotGridCanvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const isFinePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+      const prefersReducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+      const SPACING = 26;
+      const RADIUS = 200;
+      const RESTING_R = 1.1;
+      const PEAK_R = 2.8;
+
+      let width = 0;
+      let height = 0;
+      let dpr = 1;
+      let cols = 0;
+      let rows = 0;
+      let totalDots = 0;
+
+      // Flat Float32Arrays for cache locality and zero GC overhead
+      let dotBaseX = new Float32Array(0);
+      let dotBaseY = new Float32Array(0);
+      let dotIntensity = new Float32Array(0);
+
+      let mouseX = -9999;
+      let mouseY = -9999;
+      let isPointerInWindow = false;
+      let isTicking = false;
+
+      // Theme palette configuration
+      function getThemeColors() {
+        const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+        if (isDark) {
+          return {
+            // Dark (Obsidian) theme:
+            // Resting: faint resting zinc
+            resting: 'rgba(161, 161, 170, 0.12)',
+            restingR: 161, restingG: 161, restingB: 170, restingA: 0.12,
+            // Mid: Vermilion Ember (#FF4D1C)
+            midR: 255, midG: 77, midB: 28, midA: 0.85,
+            // Peak: crisp luminous warm white
+            peakR: 255, peakG: 250, peakB: 245, peakA: 1.0
+          };
+        } else {
+          return {
+            // Light (Vellum) theme:
+            // Resting: faint resting graphite / zinc
+            resting: 'rgba(24, 24, 27, 0.08)',
+            restingR: 24, restingG: 24, restingB: 27, restingA: 0.08,
+            // Mid: Vermilion Ember (#E53E10)
+            midR: 229, midG: 62, midB: 16, midA: 0.80,
+            // Peak: rich crisp warm vermilion
+            peakR: 210, peakG: 45, peakB: 12, peakA: 0.95
+          };
+        }
+      }
+
+      let palette = getThemeColors();
+
+      function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        cols = Math.ceil(width / SPACING) + 1;
+        rows = Math.ceil(height / SPACING) + 1;
+        const offsetX = (width - (cols - 1) * SPACING) / 2;
+        const offsetY = (height - (rows - 1) * SPACING) / 2;
+
+        totalDots = cols * rows;
+        dotBaseX = new Float32Array(totalDots);
+        dotBaseY = new Float32Array(totalDots);
+        dotIntensity = new Float32Array(totalDots);
+
+        let idx = 0;
+        for (let r = 0; r < rows; r++) {
+          const y = offsetY + r * SPACING;
+          for (let c = 0; c < cols; c++) {
+            const x = offsetX + c * SPACING;
+            dotBaseX[idx] = x;
+            dotBaseY[idx] = y;
+            dotIntensity[idx] = 0;
+            idx++;
+          }
+        }
+
+        drawStatic();
+      }
+
+      // Static render for initial load, resize, touch devices, and prefers-reduced-motion
+      function drawStatic() {
+        ctx.clearRect(0, 0, width, height);
+        palette = getThemeColors();
+        ctx.fillStyle = palette.resting;
+        ctx.beginPath();
+        for (let i = 0; i < totalDots; i++) {
+          ctx.moveTo(dotBaseX[i] + RESTING_R, dotBaseY[i]);
+          ctx.arc(dotBaseX[i], dotBaseY[i], RESTING_R, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      // Color interpolation helper for active elevated dots
+      function getInterpolatedColor(u) {
+        let r, g, b, a;
+        if (u < 0.5) {
+          const t = u / 0.5;
+          r = Math.round(palette.restingR + (palette.midR - palette.restingR) * t);
+          g = Math.round(palette.restingG + (palette.midG - palette.restingG) * t);
+          b = Math.round(palette.restingB + (palette.midB - palette.restingB) * t);
+          a = palette.restingA + (palette.midA - palette.restingA) * t;
+        } else {
+          const t = (u - 0.5) / 0.5;
+          r = Math.round(palette.midR + (palette.peakR - palette.midR) * t);
+          g = Math.round(palette.midG + (palette.peakG - palette.midG) * t);
+          b = Math.round(palette.midB + (palette.peakB - palette.midB) * t);
+          a = palette.midA + (palette.peakA - palette.midA) * t;
+        }
+        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+      }
+
+      function renderFrame() {
+        ctx.clearRect(0, 0, width, height);
+        palette = getThemeColors();
+
+        let hasActive = false;
+        const activeIndices = [];
+
+        // First pass: update intensities & batch-render resting dots
+        ctx.fillStyle = palette.resting;
+        ctx.beginPath();
+
+        for (let i = 0; i < totalDots; i++) {
+          const bx = dotBaseX[i];
+          const by = dotBaseY[i];
+
+          let target = 0;
+          if (isPointerInWindow) {
+            const dx = bx - mouseX;
+            const dy = by - mouseY;
+            const dist = Math.hypot(dx, dy);
+            if (dist < RADIUS) {
+              // Soft radial falloff eased with cosine
+              const norm = dist / RADIUS;
+              target = 0.5 * (1 + Math.cos(norm * Math.PI));
+            }
+          }
+
+          // Smooth trailing decay (lerp)
+          let curr = dotIntensity[i];
+          if (target > curr) {
+            curr += (target - curr) * 0.35;
+          } else {
+            curr += (target - curr) * 0.085;
+          }
+
+          if (curr < 0.002) {
+            curr = 0;
+          } else {
+            hasActive = true;
+          }
+          dotIntensity[i] = curr;
+
+          if (curr === 0) {
+            ctx.moveTo(bx + RESTING_R, by);
+            ctx.arc(bx, by, RESTING_R, 0, Math.PI * 2);
+          } else {
+            activeIndices.push(i);
+          }
+        }
+        ctx.fill();
+
+        // Second pass: render active elevated & illuminated dots individually
+        const activeCount = activeIndices.length;
+        for (let j = 0; j < activeCount; j++) {
+          const i = activeIndices[j];
+          const bx = dotBaseX[i];
+          const by = dotBaseY[i];
+          const u = dotIntensity[i];
+
+          // Scale up smoothly (RESTING_R -> PEAK_R)
+          const r = RESTING_R + (PEAK_R - RESTING_R) * u;
+
+          // Lift/rise slightly toward viewer (subtle upward Y-offset)
+          const liftY = -4.5 * u;
+
+          // Gentle radial bulge (physical dome displacement outward)
+          const dx = bx - mouseX;
+          const dy = by - mouseY;
+          const dist = Math.hypot(dx, dy);
+          let drawX = bx;
+          let drawY = by + liftY;
+
+          if (dist > 0.01 && dist < RADIUS * 1.5) {
+            const normDist = Math.min(dist / RADIUS, 1);
+            const bulge = Math.sin(normDist * Math.PI) * 3.8 * u;
+            drawX += (dx / dist) * bulge;
+            drawY += (dy / dist) * bulge;
+          }
+
+          ctx.fillStyle = getInterpolatedColor(u);
+          ctx.beginPath();
+          ctx.arc(drawX, drawY, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (hasActive || isPointerInWindow) {
+          requestAnimationFrame(renderFrame);
+        } else {
+          isTicking = false;
+          drawStatic();
+        }
+      }
+
+      function startTick() {
+        if (!isTicking) {
+          isTicking = true;
+          requestAnimationFrame(renderFrame);
+        }
+      }
+
+      const isTouchOnly = !isFinePointer;
+
+      window.addEventListener('resize', () => {
+        resize();
+        if (!isTouchOnly && !prefersReducedMotionQuery.matches && isPointerInWindow) {
+          startTick();
+        }
+      }, { passive: true });
+
+      // Dynamic Theme Observer: re-palette and redraw when data-theme changes
+      const themeObserver = new MutationObserver(() => {
+        palette = getThemeColors();
+        if (!isTicking) {
+          drawStatic();
+        }
+      });
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['data-theme']
+      });
+
+      // Initialize layout
+      resize();
+
+      // If reduced motion or touch-only device, keep static dot grid
+      if (isTouchOnly || prefersReducedMotionQuery.matches) {
+        return;
+      }
+
+      window.addEventListener('mousemove', (e) => {
+        mouseX = e.clientX;
+        mouseY = e.clientY;
+        isPointerInWindow = true;
+        startTick();
+      }, { passive: true });
+
+      document.addEventListener('mouseleave', () => {
+        isPointerInWindow = false;
+        startTick();
+      });
+
+      window.addEventListener('blur', () => {
+        isPointerInWindow = false;
+        startTick();
+      });
+
+      prefersReducedMotionQuery.addEventListener('change', (e) => {
+        if (e.matches) {
+          isPointerInWindow = false;
+          drawStatic();
+        }
+      });
+    })();
+
+    // --- Specular Spotlight & Magnetic Physics (Clean Native OS Cursor) ---
     (function initInteractions() {
       const isFinePointer = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
       const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const halo = document.getElementById('cursorHalo');
 
-      // 1. Spring-Lerp Cursor Follower Halo
-      if (isFinePointer && !prefersReducedMotion && halo) {
-        let mouseX = -100, mouseY = -100;
-        let haloX = -100, haloY = -100;
-        let isVisible = false;
-
-        window.addEventListener('mousemove', (e) => {
-          mouseX = e.clientX;
-          mouseY = e.clientY;
-          if (!isVisible) {
-            isVisible = true;
-            halo.classList.add('active');
-          }
-        }, { passive: true });
-
-        document.addEventListener('mouseleave', () => {
-          isVisible = false;
-          halo.classList.remove('active');
-        });
-
-        function renderHalo() {
-          if (isVisible) {
-            haloX += (mouseX - haloX) * 0.18;
-            haloY += (mouseY - haloY) * 0.18;
-            halo.style.transform = `translate3d(${haloX}px, ${haloY}px, 0) translate(-50%, -50%)`;
-          }
-          requestAnimationFrame(renderHalo);
-        }
-        requestAnimationFrame(renderHalo);
-
-        // Hover expansions
-        const interactiveSelector = 'button, a, .format-btn, .dpi-pill, .toggle-pill, input, select, textarea, .seo-route-link, .seo-pill-link, .seo-faq-question';
-        document.addEventListener('mouseover', (e) => {
-          if (e.target.closest('#dropzone')) {
-            halo.classList.add('dropzone-hover');
-          } else if (e.target.closest(interactiveSelector)) {
-            halo.classList.add('hovering');
-          }
-        }, { passive: true });
-
-        document.addEventListener('mouseout', (e) => {
-          if (e.target.closest('#dropzone')) {
-            halo.classList.remove('dropzone-hover');
-          }
-          if (e.target.closest(interactiveSelector)) {
-            halo.classList.remove('hovering');
-          }
-        }, { passive: true });
-      }
-
-      // 2. Cursor-Tracking Specular Spotlight (--mx, --my)
+      // 1. Cursor-Tracking Specular Spotlight (--mx, --my)
       if (isFinePointer && !prefersReducedMotion) {
         document.addEventListener('mousemove', (e) => {
           const target = e.target.closest('.dropzone, .target-section, .format-btn, .smart-options, .edit-workspace, .result-card, .history-card, .seo-category-card, .seo-step-card, .seo-tech-block, .seo-faq-item');
@@ -3792,7 +3985,7 @@
           }
         }, { passive: true });
 
-        // 3. Magnetic Buttons (max 4px translation)
+        // 2. Magnetic Buttons (max 4px translation)
         const magneticElements = [
           document.getElementById('convertBtn'),
           document.getElementById('editPreviewBtn')
