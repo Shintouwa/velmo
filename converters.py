@@ -36,6 +36,7 @@ from docx.text.paragraph import Paragraph
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
+from pptx.enum.text import MSO_ANCHOR
 
 import markdown
 from bs4 import BeautifulSoup
@@ -65,12 +66,22 @@ SUPPORTED_FORMATS = {
 _ocr_engine = None
 
 def get_ocr_engine():
-    """Returns the lazy-loaded singleton instance of RapidOCR."""
+    """Returns the lazy-loaded singleton instance of RapidOCR tuned for 512MB RAM safety."""
     global _ocr_engine
     if _ocr_engine is None:
         from rapidocr_onnxruntime import RapidOCR
-        logger.info("Initializing lazy singleton RapidOCR engine...")
-        _ocr_engine = RapidOCR()
+        logger.info("Initializing lazy singleton RapidOCR engine (1 thread, bounded tensor size)...")
+        _ocr_engine = RapidOCR(
+            intra_op_num_threads=1,
+            inter_op_num_threads=1,
+            use_cls=False,
+            max_side_len=1120,
+            det_limit_side_len=736,
+            det_limit_type="min",
+            det_box_thresh=0.35,
+            det_thresh=0.25,
+            rec_batch_num=1,
+        )
     return _ocr_engine
 
 
@@ -147,21 +158,32 @@ def sanitize_sheet_title(name: str, used_names: Set[str]) -> str:
 
 
 def parse_numeric(text: str):
-    """Parses numeric strings into int or float when appropriate."""
+    """Parses numeric strings (including comma-grouped numbers like '1,420.50') into int or float."""
     if not text:
         return ""
     stripped = text.strip()
-    try:
-        val = int(stripped)
-        if stripped == "0" or not stripped.startswith("0"):
-            return val
-    except ValueError:
-        pass
-    try:
-        val = float(stripped)
-        return val
-    except ValueError:
-        pass
+    if not stripped:
+        return ""
+
+    # Standard or comma-grouped integer (preserve leading-zero codes like '007' or '0123')
+    clean_candidate = stripped
+    if re.match(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$", stripped):
+        clean_candidate = stripped.replace(",", "")
+
+    if re.match(r"^[+-]?\d+$", clean_candidate):
+        unsigned = clean_candidate.lstrip("+-")
+        if unsigned == "0" or not unsigned.startswith("0"):
+            try:
+                return int(clean_candidate)
+            except ValueError:
+                pass
+
+    if re.match(r"^[+-]?(\d+\.\d+|\.\d+)$", clean_candidate):
+        try:
+            return float(clean_candidate)
+        except ValueError:
+            pass
+
     return text
 
 
@@ -412,6 +434,7 @@ def filter_pdf_pages(pdf_bytes: bytes, page_range_str: str) -> bytes:
         return out_bytes
     finally:
         doc.close()
+        _release_pdf_memory()
 
 
 def convert_image_format(
@@ -447,6 +470,15 @@ def convert_image_format(
             raise ValueError(f"Unsupported image target format: {target_fmt}")
 
 
+def _release_pdf_memory():
+    """Flushes PyMuPDF's internal global cache and triggers Python GC for 512MB RAM safety."""
+    try:
+        fitz.TOOLS.store_shrink(100)
+    except Exception:
+        pass
+    gc.collect()
+
+
 def pdf_to_images(
     pdf_bytes: bytes,
     target_fmt: str,
@@ -454,53 +486,55 @@ def pdf_to_images(
     dpi: int = 300,
     image_quality: int = 95
 ) -> Tuple[bytes, str, str, int]:
-    """Renders PDF pages to PNG, JPG, or WebP at custom DPI and quality."""
+    """Renders PDF pages to opaque white-paper PNG, JPG, or WebP at custom DPI and quality."""
     target_fmt = target_fmt.lower().replace("jpeg", "jpg")
+    if target_fmt not in ("png", "jpg", "webp"):
+        raise ValueError(f"Unsupported image format: {target_fmt}")
+
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
         raise ValueError(f"Invalid or corrupted PDF file: {e}")
+
+    def _render_page(page, idx: int) -> Tuple[str, bytes]:
+        # Always flatten page canvas onto white paper (alpha=False) to prevent
+        # transparent/black-box artifacts on dark viewers, JPG, and WEBP.
+        pix = page.get_pixmap(dpi=dpi, alpha=False)
+        try:
+            if target_fmt == "png":
+                return f"{base_name}_page_{idx:02d}.png", pix.tobytes("png")
+            elif target_fmt == "jpg":
+                return f"{base_name}_page_{idx:02d}.jpg", pix.tobytes("jpg", jpg_quality=image_quality)
+            else:
+                buf = io.BytesIO()
+                with Image.frombytes("RGB", [pix.width, pix.height], pix.samples) as pil_img:
+                    pil_img.save(buf, format="WEBP", quality=image_quality)
+                return f"{base_name}_page_{idx:02d}.webp", buf.getvalue()
+        finally:
+            del pix
 
     try:
         page_count = len(doc)
         if page_count == 0:
             raise ValueError("PDF contains no pages.")
 
-        rendered_images: List[Tuple[str, bytes]] = []
-        for idx, page in enumerate(doc, start=1):
-            pix = page.get_pixmap(dpi=dpi, alpha=(target_fmt != "jpg"))
-            if target_fmt == "png":
-                img_bytes = pix.tobytes("png")
-                fname = f"{base_name}_page_{idx:02d}.png"
-            elif target_fmt == "jpg":
-                img_bytes = pix.tobytes("jpg", jpg_quality=image_quality)
-                fname = f"{base_name}_page_{idx:02d}.jpg"
-            elif target_fmt == "webp":
-                buf = io.BytesIO()
-                with Image.frombytes("RGB", [pix.width, pix.height], pix.samples) as pil_img:
-                    pil_img.save(buf, format="WEBP", quality=image_quality)
-                img_bytes = buf.getvalue()
-                fname = f"{base_name}_page_{idx:02d}.webp"
-            else:
-                del pix
-                raise ValueError(f"Unsupported image format: {target_fmt}")
-            del pix
-            rendered_images.append((fname, img_bytes))
-    finally:
-        doc.close()
-        gc.collect()
+        if page_count == 1:
+            _, data = _render_page(doc[0], 1)
+            mime_map = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+            return data, mime_map[target_fmt], f"{base_name}.{target_fmt}", 1
 
-    if page_count == 1:
-        fname, data = rendered_images[0]
-        mime_map = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
-        single_fname = f"{base_name}.{target_fmt}"
-        return data, mime_map.get(target_fmt, "application/octet-stream"), single_fname, 1
-    else:
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fname, data in rendered_images:
-                zf.writestr(fname, data)
+            for idx, page in enumerate(doc, start=1):
+                fname, img_bytes = _render_page(page, idx)
+                zf.writestr(fname, img_bytes)
+                del img_bytes
+                if idx % 3 == 0:
+                    _release_pdf_memory()
         return zip_buf.getvalue(), "application/zip", f"{base_name}_{target_fmt}_pages.zip", page_count
+    finally:
+        doc.close()
+        _release_pdf_memory()
 
 
 def pdf_to_png(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
@@ -696,24 +730,398 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_index
 
 
+def _is_scanned_pdf_page(page) -> bool:
+    """Returns True if a PDF page has minimal/no digital text and contains a large raster image."""
+    txt = page.get_text("text").strip()
+    if len(txt) >= 40:
+        return False
+    imgs = page.get_images(full=True)
+    if not imgs:
+        return False
+    if len(txt) == 0:
+        return True
+    page_area = max(abs(page.rect.width * page.rect.height), 1.0)
+    try:
+        for info in page.get_image_info():
+            bbox = fitz.Rect(info["bbox"])
+            if bbox.get_area() / page_area >= 0.25:
+                return True
+    except Exception:
+        pass
+    return len(txt) < 15
+
+
+def _ocr_pdf_page(page, base_dpi: int = 150) -> List[dict]:
+    """Renders a single PDF page with bounded pixel dimensions and extracts OCR items."""
+    max_pt = max(page.rect.width, page.rect.height, 1.0)
+    eff_dpi = min(base_dpi, max(110, int(1600 * 72.0 / max_pt)))
+    pix = page.get_pixmap(dpi=eff_dpi, alpha=False)
+    img_bytes = pix.tobytes("png")
+    del pix
+    try:
+        return extract_ocr_items(img_bytes)
+    finally:
+        del img_bytes
+        gc.collect()
+
+
+def _cluster_ocr_table_rows(multi_lines: List[List[dict]]) -> List[List[str]]:
+    """Aligns multi-span OCR lines into a consistent 2D table grid via horizontal column clustering."""
+    if not multi_lines:
+        return []
+
+    # Build horizontal column intervals [x_min, x_max] from all spans
+    all_spans = [sp for ln in multi_lines for sp in ln]
+    avg_h = statistics.median([sp["height"] for sp in all_spans]) if all_spans else 20.0
+    all_spans_sorted = sorted(all_spans, key=lambda s: s["x_min"])
+
+    col_bounds: List[List[float]] = []  # [min_x, max_x]
+    for sp in all_spans_sorted:
+        placed = False
+        for cb in col_bounds:
+            # Overlap or tight horizontal alignment within 1.2 * avg_h
+            overlap = min(cb[1], sp["x_max"]) - max(cb[0], sp["x_min"])
+            if overlap > -0.4 * avg_h or abs(sp["x_min"] - cb[0]) <= 1.2 * avg_h:
+                cb[0] = min(cb[0], sp["x_min"])
+                cb[1] = max(cb[1], sp["x_max"])
+                placed = True
+                break
+        if not placed:
+            col_bounds.append([sp["x_min"], sp["x_max"]])
+
+    col_bounds.sort(key=lambda cb: cb[0])
+    num_cols = len(col_bounds)
+    if num_cols < 2:
+        return []
+
+    grid: List[List[str]] = []
+    for ln in multi_lines:
+        row_cells = [""] * num_cols
+        for sp in ln:
+            # Assign span to column with maximum overlap or nearest interval
+            best_c = 0
+            best_score = float("-inf")
+            for c_i, (cmin, cmax) in enumerate(col_bounds):
+                overlap = min(cmax, sp["x_max"]) - max(cmin, sp["x_min"])
+                if overlap > 0:
+                    score = overlap
+                else:
+                    dist = min(abs(sp["x_min"] - cmax), abs(cmin - sp["x_max"]))
+                    score = -dist
+                if score > best_score:
+                    best_score = score
+                    best_c = c_i
+            if row_cells[best_c]:
+                row_cells[best_c] += " " + sp["text"]
+            else:
+                row_cells[best_c] = sp["text"]
+        grid.append(row_cells)
+    return grid
+
+
+def _structure_ocr_blocks(items: List[dict]) -> List[Dict[str, Any]]:
+    """
+    Reconstructs RapidOCR bounding boxes into structured blocks:
+    - {"type": "heading", "level": 1|2, "text": str}
+    - {"type": "paragraph", "text": str}
+    - {"type": "table", "rows": List[List[str]]}
+    """
+    if not items:
+        return []
+
+    items_sorted = sorted(items, key=lambda it: it["y_center"])
+    raw_lines: List[List[dict]] = []
+    for item in items_sorted:
+        placed = False
+        for line in raw_lines:
+            line_y = sum(it["y_center"] for it in line) / len(line)
+            line_h = sum(it["height"] for it in line) / len(line)
+            if abs(item["y_center"] - line_y) <= max(line_h, item["height"]) * 0.55:
+                line.append(item)
+                placed = True
+                break
+        if not placed:
+            raw_lines.append([item])
+
+    raw_lines.sort(key=lambda ln: sum(it["y_center"] for it in ln) / len(ln))
+
+    # Merge tight intra-sentence items on each line; keep wide column gaps separated
+    span_lines: List[Dict[str, Any]] = []
+    for ln in raw_lines:
+        ln.sort(key=lambda it: it["x_min"])
+        line_h = sum(it["height"] for it in ln) / len(ln)
+        merged_spans: List[dict] = []
+        for it in ln:
+            if not merged_spans:
+                merged_spans.append(dict(it))
+            else:
+                prev = merged_spans[-1]
+                gap = it["x_min"] - prev["x_max"]
+                if gap < line_h * 1.1:
+                    prev["text"] = f"{prev['text']} {it['text']}"
+                    prev["x_max"] = max(prev["x_max"], it["x_max"])
+                    prev["y_min"] = min(prev["y_min"], it["y_min"])
+                    prev["y_max"] = max(prev["y_max"], it["y_max"])
+                    prev["y_center"] = (prev["y_min"] + prev["y_max"]) / 2.0
+                    prev["x_center"] = (prev["x_min"] + prev["x_max"]) / 2.0
+                    prev["height"] = max(prev["height"], it["height"])
+                else:
+                    merged_spans.append(dict(it))
+
+        span_lines.append({
+            "spans": merged_spans,
+            "y_center": sum(s["y_center"] for s in merged_spans) / len(merged_spans),
+            "height": line_h,
+            "is_multi": len(merged_spans) >= 2,
+        })
+
+    all_heights = [sp["height"] for sl in span_lines for sp in sl["spans"]]
+    median_h = statistics.median(all_heights) if all_heights else 20.0
+
+    blocks: List[Dict[str, Any]] = []
+    i = 0
+    n = len(span_lines)
+    para_buf: List[Dict[str, Any]] = []
+
+    def flush_para():
+        if not para_buf:
+            return
+        text = " ".join(" ".join(s["text"] for s in ln["spans"]) for ln in para_buf).strip()
+        if text:
+            blocks.append({"type": "paragraph", "text": text})
+        para_buf.clear()
+
+    while i < n:
+        sl = span_lines[i]
+        # Detect contiguous multi-column table block (>= 2 consecutive multi-span lines)
+        if sl["is_multi"]:
+            j = i + 1
+            while j < n and span_lines[j]["is_multi"]:
+                j += 1
+            if (j - i) >= 2:
+                table_grid = _cluster_ocr_table_rows([span_lines[k]["spans"] for k in range(i, j)])
+                if table_grid and len(table_grid[0]) >= 2:
+                    flush_para()
+                    blocks.append({"type": "table", "rows": table_grid})
+                    i = j
+                    continue
+
+        # Prose or heading line
+        line_text = " ".join(s["text"] for s in sl["spans"]).strip()
+        avg_h = sl["height"]
+        if avg_h >= 1.28 * median_h and len(line_text) < 110:
+            flush_para()
+            lvl = 1 if avg_h >= 1.55 * median_h else 2
+            blocks.append({"type": "heading", "level": lvl, "text": line_text})
+        else:
+            if para_buf:
+                prev_sl = para_buf[-1]
+                dy = sl["y_center"] - prev_sl["y_center"]
+                ref_h = max(prev_sl["height"], sl["height"], 1.0)
+                if dy > 1.65 * ref_h:
+                    flush_para()
+            para_buf.append(sl)
+        i += 1
+
+    flush_para()
+    return blocks
+
+
+def _append_ocr_blocks_to_docx(doc: Document, blocks: List[Dict[str, Any]], insert_before_elem=None):
+    """Appends structured OCR headings, paragraphs, and Word tables to a python-docx Document."""
+    created_elems = []
+    for blk in blocks:
+        btype = blk["type"]
+        if btype == "heading":
+            el = doc.add_heading(blk["text"], level=blk.get("level", 2))
+            created_elems.append(el._p)
+        elif btype == "paragraph":
+            el = doc.add_paragraph(blk["text"])
+            created_elems.append(el._p)
+        elif btype == "table":
+            rows = blk["rows"]
+            if rows:
+                num_rows = len(rows)
+                num_cols = max(len(r) for r in rows)
+                tbl = doc.add_table(rows=num_rows, cols=num_cols)
+                tbl.style = "Table Grid"
+                for r_i, row in enumerate(rows):
+                    for c_i in range(num_cols):
+                        val = row[c_i] if c_i < len(row) else ""
+                        cell = tbl.cell(r_i, c_i)
+                        p = cell.paragraphs[0]
+                        run = p.add_run(val)
+                        if r_i == 0:
+                            run.bold = True
+                            set_cell_background(cell, "F1F5F9")
+                created_elems.append(tbl._tbl)
+                sp_p = doc.add_paragraph()
+                created_elems.append(sp_p._p)
+
+    if insert_before_elem is not None:
+        for xml_el in created_elems:
+            insert_before_elem.addprevious(xml_el)
+
+
 def pdf_to_docx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
     base_name = sanitize_base_name(base_name)
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        temp_pdf_path = os.path.join(tmp_dir, "input.pdf")
-        temp_docx_path = os.path.join(tmp_dir, "output.docx")
-        with open(temp_pdf_path, "wb") as f:
-            f.write(pdf_bytes)
-        cv = None
-        try:
-            cv = Converter(temp_pdf_path)
-            cv.convert(temp_docx_path, start=0, end=None)
-        finally:
-            if cv:
-                cv.close()
+    try:
+        src_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
+
+    ocr_blocks_by_page: Dict[int, List[Dict[str, Any]]] = {}
+    all_scanned = False
+    page_count = len(src_doc)
+
+    try:
+        scanned_indices = [idx for idx, page in enumerate(src_doc) if _is_scanned_pdf_page(page)]
+        all_scanned = (len(scanned_indices) == page_count and page_count > 0)
+
+        for idx in scanned_indices:
+            items = _ocr_pdf_page(src_doc[idx], base_dpi=150)
+            blocks = _structure_ocr_blocks(items)
+            if blocks:
+                ocr_blocks_by_page[idx] = blocks
+
+        if all_scanned and ocr_blocks_by_page:
+            word_doc = Document()
+            for idx in range(page_count):
+                if idx > 0:
+                    word_doc.add_page_break()
+                blocks = ocr_blocks_by_page.get(idx, [])
+                if blocks:
+                    _append_ocr_blocks_to_docx(word_doc, blocks)
+                else:
+                    word_doc.add_paragraph(f"(No text detected on page {idx + 1})")
+            out_io = io.BytesIO()
+            word_doc.save(out_io)
+            return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", 1
+
+        # Prepare temp PDF (replacing OCR-extracted scanned pages with lightweight slot markers)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            temp_pdf_path = os.path.join(tmp_dir, "input.pdf")
+            temp_docx_path = os.path.join(tmp_dir, "output.docx")
+
+            if ocr_blocks_by_page:
+                for idx in sorted(ocr_blocks_by_page.keys()):
+                    rect = src_doc[idx].rect
+                    w, h = rect.width, rect.height
+                    src_doc.delete_page(idx)
+                    marker_page = src_doc.new_page(pno=idx, width=w, height=h)
+                    marker_page.insert_text((50, 72), f"__VELMO_OCR_PAGE_{idx}__", fontsize=11)
+                src_doc.save(temp_pdf_path, deflate=True)
+            else:
+                with open(temp_pdf_path, "wb") as f:
+                    f.write(pdf_bytes)
+
+            src_doc.close()
+            src_doc = None
             gc.collect()
-        with open(temp_docx_path, "rb") as f:
-            docx_bytes = f.read()
+
+            cv = None
+            try:
+                cv = Converter(temp_pdf_path)
+                cv.convert(temp_docx_path, start=0, end=None)
+            finally:
+                if cv:
+                    cv.close()
+                gc.collect()
+
+            if not ocr_blocks_by_page:
+                with open(temp_docx_path, "rb") as f:
+                    docx_bytes = f.read()
+            else:
+                word_doc = Document(temp_docx_path)
+                for idx, blocks in ocr_blocks_by_page.items():
+                    token = f"__VELMO_OCR_PAGE_{idx}__"
+                    target_p = None
+                    for p in word_doc.paragraphs:
+                        if token in p.text:
+                            target_p = p
+                            break
+                    if target_p is not None:
+                        _append_ocr_blocks_to_docx(word_doc, blocks, insert_before_elem=target_p._p)
+                        parent = target_p._p.getparent()
+                        if parent is not None:
+                            parent.remove(target_p._p)
+                    else:
+                        word_doc.add_page_break()
+                        _append_ocr_blocks_to_docx(word_doc, blocks)
+                out_io = io.BytesIO()
+                word_doc.save(out_io)
+                docx_bytes = out_io.getvalue()
+    finally:
+        if src_doc is not None:
+            src_doc.close()
+        _release_pdf_memory()
+
     return docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", 1
+
+
+def _find_pdf_tables(page):
+    """Finds PDF tables without triggering PyMuPDF 2.x ONNX layout models (saves ~150MB RAM)."""
+    try:
+        return page.find_tables(use_layout=False)
+    except TypeError:
+        return page.find_tables()
+
+
+def _extract_pdf_table_grid(page, tab) -> List[List[str]]:
+    """
+    Extracts table cell strings using exact cell clip rects to prevent PyMuPDF
+    baseline-splitting artifacts on decimals ('1,420.50') and underscores ('REG_CTRL_01').
+    """
+    try:
+        rows_obj = getattr(tab, "rows", None)
+        if rows_obj:
+            grid: List[List[str]] = []
+            for r in rows_obj:
+                row_vals: List[str] = []
+                for cbox in r.cells:
+                    if cbox is None:
+                        row_vals.append("")
+                    else:
+                        txt = page.get_text("text", clip=fitz.Rect(cbox)).strip()
+                        row_vals.append(re.sub(r"\s*\n\s*", " ", txt))
+                if any(v != "" for v in row_vals):
+                    grid.append(row_vals)
+            if grid:
+                return grid
+    except Exception:
+        pass
+
+    raw = tab.extract() or []
+    return [[re.sub(r"\s*\n\s*", " ", "" if c is None else str(c).strip()) for c in row] for row in raw]
+
+
+def _auto_fit_xlsx_columns(ws, min_width: int = 10, max_width: int = 50):
+    """Adjusts openpyxl column widths cleanly based on cell contents."""
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for c in col:
+            if c.value is not None:
+                lines = str(c.value).split("\n")
+                max_len = max(max_len, max(len(l) for l in lines))
+        ws.column_dimensions[col_letter].width = min(max(max_len + 3, min_width), max_width)
+
+
+def _write_table_rows_to_sheet(ws, rows: List[List[str]], start_row: int, thin_border, header_fill, style_first_row: bool = True) -> int:
+    """Writes parsed rows into an openpyxl worksheet and returns the next free row index."""
+    r_idx = start_row
+    for row in rows:
+        is_header = style_first_row and (r_idx == 1)
+        for c_idx, cell_val in enumerate(row, start=1):
+            c_str = "" if cell_val is None else str(cell_val).strip()
+            parsed = parse_numeric(c_str)
+            excel_cell = ws.cell(row=r_idx, column=c_idx, value=parsed)
+            excel_cell.border = thin_border
+            if is_header:
+                excel_cell.font = Font(bold=True)
+                excel_cell.fill = header_fill
+        r_idx += 1
+    return r_idx
 
 
 def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
@@ -736,50 +1144,90 @@ def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
 
         used_sheet_titles: Set[str] = set()
         table_count = 0
-        document_text_blocks = []
+        document_text_blocks: List[Tuple[int, str]] = []
+
+        # Track previous table state across consecutive pages to merge multi-page tables cleanly
+        last_ws = None
+        last_header_sig: Optional[Tuple[str, ...]] = None
+        last_next_row = 1
+        last_table_page = -1
 
         for p_no, page in enumerate(doc, start=1):
-            tabs = page.find_tables()
-            table_bboxes = []
+            if _is_scanned_pdf_page(page):
+                items = _ocr_pdf_page(page, base_dpi=150)
+                ocr_blocks = _structure_ocr_blocks(items)
+                t_no = 0
+                for blk in ocr_blocks:
+                    if blk["type"] == "table" and blk["rows"]:
+                        t_no += 1
+                        table_count += 1
+                        sheet_title = sanitize_sheet_title(f"Page_{p_no}_Table_{t_no}", used_sheet_titles)
+                        ws = wb.create_sheet(title=sheet_title)
+                        next_r = _write_table_rows_to_sheet(ws, blk["rows"], 1, thin_border, header_fill, style_first_row=True)
+                        _auto_fit_xlsx_columns(ws)
+                        last_ws = ws
+                        last_header_sig = tuple(c.strip() for c in blk["rows"][0])
+                        last_next_row = next_r
+                        last_table_page = p_no
+                    elif blk["type"] in ("heading", "paragraph") and blk.get("text"):
+                        document_text_blocks.append((p_no, blk["text"]))
+                continue
 
-            for t_no, tab in enumerate(tabs, start=1):
-                extracted = tab.extract()
+            tabs = _find_pdf_tables(page)
+            table_bboxes = []
+            valid_tables: List[Tuple[Any, List[List[str]]]] = []
+            for tab in tabs:
+                extracted = _extract_pdf_table_grid(page, tab)
                 if not extracted:
                     continue
-
-                table_count += 1
+                # Skip trivial 1-row layout/callout boxes so prose flows into Document Text
+                if len(extracted) < 2:
+                    continue
+                valid_tables.append((tab, extracted))
                 table_bboxes.append(tab.bbox)
-                sheet_title = sanitize_sheet_title(f"Page_{p_no}_Table_{t_no}", used_sheet_titles)
-                ws = wb.create_sheet(title=sheet_title)
 
-                for r_idx, row in enumerate(extracted, start=1):
-                    is_header = (r_idx == 1)
-                    for c_idx, cell_val in enumerate(row, start=1):
-                        c_str = "" if cell_val is None else str(cell_val).strip()
-                        parsed = parse_numeric(c_str)
-                        excel_cell = ws.cell(row=r_idx, column=c_idx, value=parsed)
-                        excel_cell.border = thin_border
-                        if is_header:
-                            excel_cell.font = Font(bold=True)
-                            excel_cell.fill = header_fill
-
-                for col in ws.columns:
-                    max_len = 0
-                    col_letter = get_column_letter(col[0].column)
-                    for c in col:
-                        if c.value is not None:
-                            lines = str(c.value).split("\n")
-                            max_len = max(max_len, max(len(l) for l in lines))
-                    ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+            for t_no, (tab, extracted) in enumerate(valid_tables, start=1):
+                cur_header_sig = tuple(c.strip() for c in extracted[0])
+                can_merge_with_prev = (
+                    t_no == 1
+                    and last_ws is not None
+                    and last_table_page == p_no - 1
+                    and last_header_sig is not None
+                    and len(cur_header_sig) == len(last_header_sig)
+                    and cur_header_sig == last_header_sig
+                    and len(extracted) > 1
+                )
+                if can_merge_with_prev:
+                    last_next_row = _write_table_rows_to_sheet(
+                        last_ws, extracted[1:], last_next_row, thin_border, header_fill, style_first_row=False
+                    )
+                    _auto_fit_xlsx_columns(last_ws)
+                    last_table_page = p_no
+                else:
+                    table_count += 1
+                    sheet_title = sanitize_sheet_title(f"Page_{p_no}_Table_{t_no}", used_sheet_titles)
+                    ws = wb.create_sheet(title=sheet_title)
+                    next_r = _write_table_rows_to_sheet(ws, extracted, 1, thin_border, header_fill, style_first_row=True)
+                    _auto_fit_xlsx_columns(ws)
+                    last_ws = ws
+                    last_header_sig = cur_header_sig
+                    last_next_row = next_r
+                    last_table_page = p_no
 
             blocks = page.get_text("blocks")
             for b in blocks:
+                if len(b) > 6 and b[6] != 0:
+                    continue
                 b_rect = fitz.Rect(b[0], b[1], b[2], b[3])
                 b_text = b[4].strip()
                 if not b_text:
                     continue
-                in_table = any(b_rect.intersects(fitz.Rect(t_box)) for t_box in table_bboxes)
-                if not in_table or table_count == 0:
+                b_area = max(b_rect.get_area(), 1.0)
+                in_table = any(
+                    ((b_rect & fitz.Rect(t_box)).get_area() / b_area) > 0.35
+                    for t_box in table_bboxes
+                )
+                if not in_table:
                     document_text_blocks.append((p_no, b_text))
 
         text_sheet_title = sanitize_sheet_title("Document Text", used_sheet_titles)
@@ -803,14 +1251,7 @@ def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
             c1.border = thin_border
             c2.border = thin_border
 
-        for col in ws_text.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for c in col:
-                if c.value is not None:
-                    lines = str(c.value).split("\n")
-                    max_len = max(max_len, max(len(l) for l in lines))
-            ws_text.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 65)
+        _auto_fit_xlsx_columns(ws_text, min_width=12, max_width=65)
 
         if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
             wb.remove(default_sheet)
@@ -821,7 +1262,7 @@ def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
         return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_count
     finally:
         doc.close()
-        gc.collect()
+        _release_pdf_memory()
 
 
 def convert_via_libreoffice(input_bytes: bytes, suffix: str) -> Optional[bytes]:
@@ -1439,8 +1880,94 @@ def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", len(image_list)
 
 
+def _add_aspect_fit_picture(slide, img_bytes: bytes, box_left, box_top, box_w, box_h):
+    """Places an image centered inside the target box while strictly preserving aspect ratio."""
+    with Image.open(io.BytesIO(img_bytes)) as pil_img:
+        iw, ih = max(pil_img.width, 1), max(pil_img.height, 1)
+    scale = min(box_w / iw, box_h / ih)
+    draw_w = int(iw * scale)
+    draw_h = int(ih * scale)
+    left = int(box_left + (box_w - draw_w) / 2)
+    top = int(box_top + (box_h - draw_h) / 2)
+    slide.shapes.add_picture(io.BytesIO(img_bytes), left, top, draw_w, draw_h)
+
+
+def _add_styled_pptx_table(slide, rows: List[List[str]], left, top, width, max_height):
+    """Renders a complete non-clipped styled table onto a slide without row/column truncation."""
+    if not rows:
+        return
+    n_r = len(rows)
+    n_c = max(len(r) for r in rows)
+    if n_r == 0 or n_c == 0:
+        return
+
+    if n_r <= 8 and n_c <= 6:
+        font_pt = 10.5
+    elif n_r <= 14 and n_c <= 9:
+        font_pt = 8.5
+    elif n_r <= 22:
+        font_pt = 7.5
+    else:
+        font_pt = 6.5
+
+    est_h = min(max_height, Inches(max(1.2, n_r * (0.24 if n_r > 14 else 0.36))))
+    shape = slide.shapes.add_table(n_r, n_c, left, top, width, est_h)
+    tbl = shape.table
+
+    for r_i, row in enumerate(rows):
+        is_hdr = (r_i == 0)
+        row_bg = RGBColor(15, 23, 42) if is_hdr else (RGBColor(248, 250, 252) if r_i % 2 == 1 else RGBColor(255, 255, 255))
+        for c_i in range(n_c):
+            cell = tbl.cell(r_i, c_i)
+            val = str(row[c_i]).strip() if c_i < len(row) and row[c_i] is not None else ""
+            cell.text = val
+            cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+            cell.margin_top = Pt(1.5)
+            cell.margin_bottom = Pt(1.5)
+            cell.margin_left = Pt(3)
+            cell.margin_right = Pt(3)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = row_bg
+            for p in cell.text_frame.paragraphs:
+                p.font.size = Pt(font_pt)
+                p.font.bold = is_hdr
+                p.font.color.rgb = RGBColor(255, 255, 255) if is_hdr else RGBColor(15, 23, 42)
+
+
+def _add_fitted_textbox(slide, lines: List[str], left, top, width, height, max_pt: float = 12.0, min_pt: float = 7.5):
+    """Places all text lines inside a bounded textbox, scaling font smoothly to prevent clipping."""
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.margin_top = Pt(2)
+    tf.margin_bottom = Pt(2)
+    tf.margin_left = Pt(4)
+    tf.margin_right = Pt(4)
+
+    width_in = max(width / Inches(1), 1.0)
+    height_in = max(height / Inches(1), 0.5)
+
+    chosen_pt = min_pt
+    for pt in [max_pt, 11.0, 10.0, 9.0, 8.2, 7.5]:
+        if pt > max_pt:
+            continue
+        chars_per_line = max(int(width_in * 10.5 * (12.0 / pt)), 20)
+        est_lines = sum(max(1, (len(ln) + chars_per_line - 1) // chars_per_line) for ln in lines)
+        line_h_in = (pt * 1.32) / 72.0
+        if est_lines * line_h_in <= height_in * 0.96:
+            chosen_pt = pt
+            break
+
+    for idx, ln in enumerate(lines):
+        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+        p.text = ln
+        p.font.size = Pt(chosen_pt)
+        p.font.color.rgb = RGBColor(30, 41, 59)
+        p.space_after = Pt(2 if chosen_pt <= 9.5 else 4)
+
+
 def pdf_to_pptx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Creates presentation slides per PDF page with extracted text/tables or crisp image fallback."""
+    """Creates clean, non-overlapping 16:9 presentation slides per PDF page with full tables and OCR fallback."""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as e:
@@ -1452,50 +1979,151 @@ def pdf_to_pptx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
         prs.slide_height = Inches(7.5)
         blank_layout = prs.slide_layouts[6]
 
+        margin_x = Inches(0.55)
+        content_w = Inches(12.23)
+
         for p_no, page in enumerate(doc, start=1):
             slide = prs.slides.add_slide(blank_layout)
-            text = page.get_text().strip()
-            tabs = page.find_tables()
-            table_list = tabs.tables if hasattr(tabs, "tables") else list(tabs)
 
-            if text or len(table_list) > 0:
-                # Text / table slide
-                t_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(0.8))
-                t_box.text_frame.paragraphs[0].text = f"Page {p_no}"
-                t_box.text_frame.paragraphs[0].font.size = Pt(24)
-                t_box.text_frame.paragraphs[0].font.bold = True
-
-                content_box = slide.shapes.add_textbox(Inches(0.8), Inches(1.5), Inches(11.7), Inches(5.2))
-                ctf = content_box.text_frame
-                ctf.word_wrap = True
-
-                lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-                for ln in lines[:15]:
-                    p = ctf.add_paragraph()
-                    p.text = ln
-                    p.font.size = Pt(13)
-
-                if len(table_list) > 0:
-                    extracted = table_list[0].extract()
-                    if extracted:
-                        n_r = min(len(extracted), 6)
-                        n_c = min(len(extracted[0]), 6)
-                        shape = slide.shapes.add_table(n_r, n_c, Inches(0.8), Inches(4.5), Inches(11.7), Inches(2.2))
-                        for r_i in range(n_r):
-                            for c_i in range(n_c):
-                                shape.table.cell(r_i, c_i).text = str(extracted[r_i][c_i] or "")
-            else:
-                # Image slide fallback
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                slide.shapes.add_picture(io.BytesIO(pix.tobytes("png")), Inches(1.5), Inches(0.5), Inches(10.33), Inches(6.5))
+            if _is_scanned_pdf_page(page):
+                items = _ocr_pdf_page(page, base_dpi=150)
+                blocks = _structure_ocr_blocks(items)
+                pix = page.get_pixmap(dpi=130, alpha=False)
+                scan_thumb = pix.tobytes("png")
                 del pix
+
+                if blocks:
+                    headings = [b["text"] for b in blocks if b["type"] == "heading"]
+                    tables = [b["rows"] for b in blocks if b["type"] == "table"]
+                    paras = [b["text"] for b in blocks if b["type"] == "paragraph"]
+
+                    title_txt = headings[0] if headings else f"Page {p_no} (Scanned)"
+                    t_box = slide.shapes.add_textbox(margin_x, Inches(0.30), content_w, Inches(0.60))
+                    t_p = t_box.text_frame.paragraphs[0]
+                    t_p.text = title_txt[:110]
+                    t_p.font.size = Pt(20)
+                    t_p.font.bold = True
+                    t_p.font.color.rgb = RGBColor(15, 23, 42)
+
+                    ocr_lines = headings[1:] + paras
+                    if tables:
+                        if ocr_lines:
+                            _add_fitted_textbox(slide, ocr_lines, margin_x, Inches(0.95), content_w, Inches(1.25), max_pt=11.0)
+                            _add_styled_pptx_table(slide, tables[0], margin_x, Inches(2.30), content_w, Inches(4.85))
+                        else:
+                            _add_styled_pptx_table(slide, tables[0], margin_x, Inches(1.05), content_w, Inches(6.05))
+                    else:
+                        if ocr_lines:
+                            _add_fitted_textbox(slide, ocr_lines, margin_x, Inches(0.98), Inches(7.40), Inches(6.15), max_pt=12.0)
+                        _add_aspect_fit_picture(slide, scan_thumb, Inches(8.15), Inches(0.98), Inches(4.63), Inches(6.15))
+
+                    # Also store full OCR transcript in speaker notes
+                    all_ocr_text = "\n".join(
+                        [b["text"] if b["type"] != "table" else "\n".join(" | ".join(r) for r in b["rows"]) for b in blocks]
+                    )
+                    slide.notes_slide.notes_text_frame.text = all_ocr_text
+                else:
+                    _add_aspect_fit_picture(slide, scan_thumb, margin_x, Inches(0.40), content_w, Inches(6.70))
+
+                del scan_thumb
+                gc.collect()
+                continue
+
+            # Digital page
+            tabs = _find_pdf_tables(page)
+            valid_tables: List[List[List[str]]] = []
+            table_bboxes = []
+            for tab in tabs:
+                extracted = _extract_pdf_table_grid(page, tab)
+                if not extracted or len(extracted) < 2:
+                    continue
+                valid_tables.append(extracted)
+                table_bboxes.append(tab.bbox)
+
+            raw_blocks = page.get_text("blocks")
+            non_table_lines: List[str] = []
+            for b in raw_blocks:
+                if len(b) > 6 and b[6] != 0:
+                    continue
+                b_rect = fitz.Rect(b[0], b[1], b[2], b[3])
+                b_text = re.sub(r"\s*\n\s*", " ", b[4].strip())
+                if not b_text:
+                    continue
+                b_area = max(b_rect.get_area(), 1.0)
+                in_table = any(((b_rect & fitz.Rect(tb)).get_area() / b_area) > 0.35 for tb in table_bboxes)
+                if not in_table:
+                    non_table_lines.append(b_text)
+
+            has_images = len(page.get_images()) > 0
+            title_txt = f"Page {p_no}"
+            for ln in non_table_lines:
+                if 6 <= len(ln) <= 95 and "CONFIDENTIAL" not in ln and "Symbols:" not in ln and "Currencies:" not in ln:
+                    title_txt = ln
+                    break
+
+            t_box = slide.shapes.add_textbox(margin_x, Inches(0.30), content_w, Inches(0.58))
+            t_box.text_frame.word_wrap = True
+            tp = t_box.text_frame.paragraphs[0]
+            tp.text = f"Page {p_no} — {title_txt}" if title_txt != f"Page {p_no}" else title_txt
+            tp.font.size = Pt(18)
+            tp.font.bold = True
+            tp.font.color.rgb = RGBColor(15, 23, 42)
+
+            if valid_tables:
+                primary_tbl = valid_tables[0]
+                n_rows = len(primary_tbl)
+                if n_rows >= 14:
+                    prose_h = Inches(1.15)
+                    tbl_top = Inches(2.22)
+                    tbl_max_h = Inches(4.95)
+                elif has_images:
+                    prose_h = Inches(1.90)
+                    tbl_top = Inches(2.98)
+                    tbl_max_h = Inches(4.18)
+                else:
+                    prose_h = Inches(1.85)
+                    tbl_top = Inches(2.93)
+                    tbl_max_h = Inches(4.22)
+
+                if has_images and n_rows < 14:
+                    if non_table_lines:
+                        _add_fitted_textbox(slide, non_table_lines, margin_x, Inches(0.95), Inches(8.15), prose_h, max_pt=10.5)
+                    pix = page.get_pixmap(dpi=120, alpha=False)
+                    snap = pix.tobytes("png")
+                    del pix
+                    _add_aspect_fit_picture(slide, snap, Inches(8.90), Inches(0.95), Inches(3.88), prose_h)
+                    del snap
+                elif non_table_lines:
+                    _add_fitted_textbox(slide, non_table_lines, margin_x, Inches(0.95), content_w, prose_h, max_pt=10.5)
+                else:
+                    tbl_top = Inches(1.00)
+                    tbl_max_h = Inches(6.15)
+
+                _add_styled_pptx_table(slide, primary_tbl, margin_x, tbl_top, content_w, tbl_max_h)
+
+            elif non_table_lines or has_images:
+                if has_images and non_table_lines:
+                    _add_fitted_textbox(slide, non_table_lines, margin_x, Inches(0.98), Inches(7.35), Inches(6.15), max_pt=12.0)
+                    pix = page.get_pixmap(dpi=130, alpha=False)
+                    snap = pix.tobytes("png")
+                    del pix
+                    _add_aspect_fit_picture(slide, snap, Inches(8.10), Inches(0.98), Inches(4.68), Inches(6.15))
+                    del snap
+                elif non_table_lines:
+                    _add_fitted_textbox(slide, non_table_lines, margin_x, Inches(0.98), content_w, Inches(6.15), max_pt=12.5)
+                else:
+                    pix = page.get_pixmap(dpi=140, alpha=False)
+                    snap = pix.tobytes("png")
+                    del pix
+                    _add_aspect_fit_picture(slide, snap, margin_x, Inches(0.98), content_w, Inches(6.15))
+                    del snap
 
         out_io = io.BytesIO()
         prs.save(out_io)
         return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", len(prs.slides)
     finally:
         doc.close()
-        gc.collect()
+        _release_pdf_memory()
 
 
 # --- CSV (.csv) Converters ---
@@ -1671,9 +2299,29 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
     elif input_fmt == "pdf":
         doc = fitz.open(stream=data_bytes, filetype="pdf")
         try:
-            text = "\n\n".join(f"--- Page {i} ---\n" + page.get_text() for i, page in enumerate(doc, start=1))
+            page_chunks: List[str] = []
+            for i, page in enumerate(doc, start=1):
+                if _is_scanned_pdf_page(page):
+                    items = _ocr_pdf_page(page, base_dpi=150)
+                    blocks = _structure_ocr_blocks(items)
+                    if blocks:
+                        lines_out: List[str] = []
+                        for blk in blocks:
+                            if blk["type"] == "table" and blk.get("rows"):
+                                for row in blk["rows"]:
+                                    lines_out.append("\t".join(str(c).strip() for c in row))
+                            elif blk.get("text"):
+                                lines_out.append(blk["text"])
+                        page_txt = "\n".join(lines_out)
+                    else:
+                        page_txt = page.get_text() or "(No text detected on scanned page)"
+                else:
+                    page_txt = page.get_text()
+                page_chunks.append(f"--- Page {i} ---\n{page_txt.strip()}")
+            text = "\n\n".join(page_chunks)
         finally:
             doc.close()
+            _release_pdf_memory()
 
     elif input_fmt == "docx":
         doc = Document(io.BytesIO(data_bytes))
@@ -1715,6 +2363,346 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
     return text.encode("utf-8"), "text/plain; charset=utf-8", f"{base_name}.txt", 1
 
 
+def _format_md_table(rows: List[List[str]]) -> str:
+    """Formats a 2D cell grid into a valid GFM Markdown pipe table."""
+    if not rows:
+        return ""
+    max_cols = max(len(r) for r in rows)
+    if max_cols == 0:
+        return ""
+
+    def clean_cell(val: Any) -> str:
+        s = "" if val is None else str(val).strip()
+        s = re.sub(r"\s*\n\s*", " ", s)
+        return s.replace("|", "\\|")
+
+    lines: List[str] = []
+    hdr = [clean_cell(rows[0][c] if c < len(rows[0]) else "") for c in range(max_cols)]
+    lines.append("| " + " | ".join(hdr) + " |")
+    lines.append("| " + " | ".join(["---"] * max_cols) + " |")
+    for row in rows[1:]:
+        cells = [clean_cell(row[c] if c < len(row) else "") for c in range(max_cols)]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _is_mono_font(font_name: str) -> bool:
+    fn = (font_name or "").lower()
+    return any(k in fn for k in ("consola", "courier", "mono", "menlo", "cascadia", "fira", "inconsolata", "dejavusansmono", "liberationmono"))
+
+
+def _render_pdf_block_text_with_links(blk: dict, page_links: List[Tuple[fitz.Rect, str]]) -> Tuple[str, float, bool, bool]:
+    """
+    Reconstructs text from a PyMuPDF dict block while preserving clickable hyperlinks
+    and detecting dominant font size, bold status, and monospace code blocks.
+    Returns: (text, dom_size, all_bold, is_monospace)
+    """
+    mono_chars = 0
+    total_chars = 0
+    size_weights: Dict[float, int] = {}
+    bold_chars = 0
+    nonspace_chars = 0
+
+    raw_lines: List[str] = []
+    for ln in blk.get("lines", []):
+        spans = ln.get("spans", [])
+        if not spans:
+            continue
+
+        # Build line segments merging consecutive spans sharing the same link URI
+        segments: List[Tuple[Optional[str], str, bool]] = []  # (uri, text, is_bold)
+        for sp in spans:
+            stxt = (sp.get("text") or "").replace("\xa0", " ")
+            if not stxt:
+                continue
+            stripped_len = len(stxt.strip())
+            total_chars += len(stxt)
+            nonspace_chars += stripped_len
+            if _is_mono_font(sp.get("font", "")):
+                mono_chars += stripped_len
+            sz = round(float(sp.get("size", 10.0)), 1)
+            size_weights[sz] = size_weights.get(sz, 0) + max(stripped_len, 1)
+            is_bold = bool(sp.get("flags", 0) & 16) or ("bold" in (sp.get("font", "").lower()))
+            if is_bold:
+                bold_chars += stripped_len
+
+            sp_rect = fitz.Rect(sp["bbox"])
+            sp_area = max(sp_rect.get_area(), 1.0)
+            matched_uri = None
+            for lrect, uri in page_links:
+                if ((sp_rect & lrect).get_area() / sp_area) > 0.35:
+                    matched_uri = uri
+                    break
+
+            if segments and matched_uri is not None and segments[-1][0] == matched_uri:
+                prev_uri, prev_txt, prev_b = segments[-1]
+                segments[-1] = (prev_uri, prev_txt + stxt, prev_b and is_bold)
+            else:
+                segments.append((matched_uri, stxt, is_bold))
+
+        line_parts = []
+        for uri, seg_txt, _ in segments:
+            if uri:
+                clean_lbl = seg_txt.strip()
+                if clean_lbl:
+                    lead_ws = seg_txt[: len(seg_txt) - len(seg_txt.lstrip())]
+                    trail_ws = seg_txt[len(seg_txt.rstrip()):]
+                    line_parts.append(f"{lead_ws}[{clean_lbl}]({uri}){trail_ws}")
+                else:
+                    line_parts.append(seg_txt)
+            else:
+                line_parts.append(seg_txt)
+        raw_lines.append("".join(line_parts).rstrip())
+
+    is_mono = (nonspace_chars > 0 and (mono_chars / nonspace_chars) >= 0.70)
+    all_bold = (nonspace_chars > 0 and (bold_chars / nonspace_chars) >= 0.80)
+    dom_size = max(size_weights.items(), key=lambda kv: kv[1])[0] if size_weights else 10.0
+
+    if is_mono:
+        return "\n".join(raw_lines).strip("\n"), dom_size, all_bold, True
+
+    # Join lines smartly: keep distinct list/bullet/footnote items on separate lines
+    joined_lines: List[str] = []
+    for ln in raw_lines:
+        s = ln.strip()
+        if not s:
+            continue
+        is_list_start = bool(re.match(r"^([•◦▪\-]|\d+[\.\)]|[a-zA-Z]\)|\[\d+\])\s+", s))
+        if not joined_lines:
+            joined_lines.append(s)
+        elif is_list_start or joined_lines[-1].endswith(":"):
+            joined_lines.append(s)
+        else:
+            joined_lines[-1] = f"{joined_lines[-1]} {s}"
+
+    return "\n".join(joined_lines), dom_size, all_bold, False
+
+
+def _order_page_blocks_reading_order(blocks: List[dict], page_w: float) -> List[dict]:
+    """Orders text blocks respecting 2-column page layouts before falling back to top-to-bottom."""
+    if len(blocks) < 4:
+        return sorted(blocks, key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
+
+    mid_x = page_w / 2.0
+    full_top = []
+    left_col = []
+    right_col = []
+    other = []
+
+    for b in blocks:
+        x0, y0, x1, y1 = b["bbox"]
+        if x0 < mid_x - 20 and x1 > mid_x + 20:
+            other.append(b)
+        elif x1 <= mid_x + 12:
+            left_col.append(b)
+        elif x0 >= mid_x - 12:
+            right_col.append(b)
+        else:
+            other.append(b)
+
+    # Check if there is genuine vertical overlap between left and right columns (2-column article)
+    if len(left_col) >= 2 and len(right_col) >= 2 and len(other) <= 2:
+        l_min_y = min(b["bbox"][1] for b in left_col)
+        l_max_y = max(b["bbox"][3] for b in left_col)
+        r_min_y = min(b["bbox"][1] for b in right_col)
+        r_max_y = max(b["bbox"][3] for b in right_col)
+        vert_overlap = min(l_max_y, r_max_y) - max(l_min_y, r_min_y)
+        if vert_overlap > 60.0:
+            col_top = min(l_min_y, r_min_y)
+            full_top = sorted([b for b in other if b["bbox"][1] < col_top], key=lambda b: b["bbox"][1])
+            full_bot = sorted([b for b in other if b["bbox"][1] >= col_top], key=lambda b: b["bbox"][1])
+            left_col.sort(key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
+            right_col.sort(key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
+            return full_top + left_col + right_col + full_bot
+
+    return sorted(blocks, key=lambda b: (round(b["bbox"][1], 1), round(b["bbox"][0], 1)))
+
+
+def pdf_to_md(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+    """Extracts structured Markdown directly from PDF text spans, links, tables, code blocks, and scanned-page OCR."""
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted PDF file: {e}")
+
+    try:
+        total_pages = len(doc)
+        if total_pages == 0:
+            raise ValueError("PDF document has no pages.")
+
+        # Pass 1: Cache digital page tables and determine median prose body font size
+        page_tables_cache: Dict[int, Tuple[List[Tuple[float, List[List[str]]]], List[Any]]] = {}
+        size_hist: Dict[float, int] = {}
+        for p_idx, page in enumerate(doc):
+            if _is_scanned_pdf_page(page):
+                continue
+            tabs = _find_pdf_tables(page)
+            table_items: List[Tuple[float, List[List[str]]]] = []
+            table_bboxes = []
+            for tab in tabs:
+                extracted = _extract_pdf_table_grid(page, tab)
+                if not extracted or len(extracted) < 2:
+                    continue
+                table_items.append((tab.bbox[1], extracted))
+                table_bboxes.append(tab.bbox)
+            table_items.sort(key=lambda item: item[0])
+            page_tables_cache[p_idx] = (table_items, table_bboxes)
+
+            ph = page.rect.height
+            d = page.get_text("dict")
+            for b in d.get("blocks", []):
+                if b.get("type") != 0:
+                    continue
+                b_rect = fitz.Rect(b["bbox"])
+                if b_rect.y1 <= 36 or b_rect.y0 >= ph - 36:
+                    continue
+                b_area = max(b_rect.get_area(), 1.0)
+                if any(((b_rect & fitz.Rect(tb)).get_area() / b_area) > 0.35 for tb in table_bboxes):
+                    continue
+                for ln in b.get("lines", []):
+                    for sp in ln.get("spans", []):
+                        if _is_mono_font(sp.get("font", "")):
+                            continue
+                        t = (sp.get("text") or "").strip()
+                        if t:
+                            sz = round(float(sp.get("size", 10.0)), 1)
+                            size_hist[sz] = size_hist.get(sz, 0) + len(t)
+
+        body_size = max(size_hist.items(), key=lambda kv: kv[1])[0] if size_hist else 10.0
+
+        md_parts: List[str] = []
+        seen_running_hf: Set[str] = set()
+
+        for p_no, page in enumerate(doc, start=1):
+            if p_no > 1:
+                md_parts.append("\n---\n")
+
+            if _is_scanned_pdf_page(page):
+                items = _ocr_pdf_page(page, base_dpi=150)
+                blocks = _structure_ocr_blocks(items)
+                if not blocks:
+                    md_parts.append(f"*(Scanned Page {p_no}: no text detected)*\n")
+                    continue
+                for blk in blocks:
+                    if blk["type"] == "heading":
+                        prefix = "#" if blk.get("level", 2) == 1 else "##"
+                        md_parts.append(f"{prefix} {blk['text']}\n")
+                    elif blk["type"] == "paragraph":
+                        md_parts.append(f"{blk['text']}\n")
+                    elif blk["type"] == "table" and blk.get("rows"):
+                        md_parts.append(_format_md_table(blk["rows"]) + "\n")
+                continue
+
+            pw, ph = page.rect.width, page.rect.height
+            page_links = [(fitz.Rect(l["from"]), l["uri"]) for l in page.get_links() if l.get("uri")]
+            table_items, table_bboxes = page_tables_cache.get(p_no - 1, ([], []))
+
+            d = page.get_text("dict")
+            prose_blocks: List[dict] = []
+            hf_lines: List[str] = []
+
+            for b in d.get("blocks", []):
+                if b.get("type") != 0:
+                    continue
+                b_rect = fitz.Rect(b["bbox"])
+                b_area = max(b_rect.get_area(), 1.0)
+                if any(((b_rect & fitz.Rect(tb)).get_area() / b_area) > 0.35 for tb in table_bboxes):
+                    continue
+                if b_rect.y1 <= 36 or b_rect.y0 >= ph - 36:
+                    hf_txt, _, _, _ = _render_pdf_block_text_with_links(b, page_links)
+                    hf_clean = re.sub(r"\s+", " ", hf_txt).strip()
+                    if hf_clean:
+                        hf_lines.append(hf_clean)
+                    continue
+                prose_blocks.append(b)
+
+            # Include unique header on Page 1; deduplicate repeated headers across pages
+            for hf in hf_lines:
+                if hf not in seen_running_hf and not re.search(r"Page\s+\d+\s*(of|/)\s*\d+", hf, re.I):
+                    seen_running_hf.add(hf)
+                    md_parts.append(f"*{hf}*\n")
+
+            ordered_blocks = _order_page_blocks_reading_order(prose_blocks, pw)
+            t_idx = 0
+            mono_buf: List[str] = []
+
+            def flush_mono():
+                if mono_buf:
+                    md_parts.append("```\n" + "\n\n".join(mono_buf) + "\n```\n")
+                    mono_buf.clear()
+
+            for b in ordered_blocks:
+                by0 = b["bbox"][1]
+                # Emit any tables situated above this block
+                while t_idx < len(table_items) and table_items[t_idx][0] <= by0:
+                    flush_mono()
+                    md_parts.append(_format_md_table(table_items[t_idx][1]) + "\n")
+                    t_idx += 1
+
+                txt, dom_size, all_bold, is_mono = _render_pdf_block_text_with_links(b, page_links)
+                if not txt.strip():
+                    continue
+
+                if is_mono:
+                    mono_buf.append(txt)
+                    continue
+
+                flush_mono()
+
+                # Classify headings vs lists vs paragraphs
+                single_line = "\n" not in txt.strip()
+                clean_s = txt.strip()
+                ratio = dom_size / max(body_size, 1.0)
+                is_numbered_h = bool(re.match(r"^\d+(\.\d+){0,4}\.?\s+[A-Z]", clean_s))
+                looks_like_bullet = bool(re.match(r"^([•◦▪]|\[\d+\]|_+)", clean_s))
+                looks_like_kpi_val = (
+                    len(clean_s) <= 18
+                    and bool(re.match(r"^[+\-₹€$£]?\s*[\d,\.]+\s*(%|Cr|MWh|GWh|MW|ms|Ω|°C|kWh)?$", clean_s, re.I))
+                )
+
+                if (
+                    single_line
+                    and len(clean_s) <= 115
+                    and not looks_like_bullet
+                    and not looks_like_kpi_val
+                    and not clean_s.endswith(",")
+                    and not (clean_s.endswith(".") and not is_numbered_h)
+                    and (ratio >= 1.14 or (all_bold and (is_numbered_h or ratio >= 1.02)))
+                ):
+                    if ratio >= 1.62:
+                        lvl = 1
+                    elif ratio >= 1.32:
+                        lvl = 2
+                    elif ratio >= 1.14:
+                        lvl = 3
+                    else:
+                        lvl = 4
+                    md_parts.append(f"{'#' * lvl} {clean_s}\n")
+                else:
+                    # Format bullet/list items cleanly in Markdown
+                    out_lines = []
+                    for ln in txt.splitlines():
+                        ls = ln.strip()
+                        if ls.startswith("• "):
+                            out_lines.append("- " + ls[2:].strip())
+                        elif ls.startswith("◦ "):
+                            out_lines.append("  - " + ls[2:].strip())
+                        else:
+                            out_lines.append(ls)
+                    md_parts.append("\n".join(out_lines) + "\n")
+
+            flush_mono()
+            while t_idx < len(table_items):
+                md_parts.append(_format_md_table(table_items[t_idx][1]) + "\n")
+                t_idx += 1
+
+        md_text = "\n".join(md_parts).strip() + "\n"
+        return md_text.encode("utf-8"), "text/markdown; charset=utf-8", f"{base_name}.md", 1
+    finally:
+        doc.close()
+        _release_pdf_memory()
+
+
 def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates structured Markdown from any document."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -1744,12 +2732,8 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
             elif child.tag.endswith('tbl'):
                 tbl = Table(child, doc)
                 if tbl.rows:
-                    header = [c.text.strip() for c in tbl.rows[0].cells]
-                    parts.append("| " + " | ".join(header) + " |")
-                    parts.append("| " + " | ".join(["---"] * len(header)) + " |")
-                    for row in tbl.rows[1:]:
-                        parts.append("| " + " | ".join(c.text.strip() for c in row.cells) + " |")
-                    parts.append("")
+                    rows_grid = [[c.text.strip() for c in row.cells] for row in tbl.rows]
+                    parts.append(_format_md_table(rows_grid) + "\n")
         md_text = "\n".join(parts)
 
     elif input_fmt in ("xlsx", "csv"):
@@ -1764,17 +2748,12 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
             parts.append(f"## Sheet: {ws.title}\n")
             rows = [r for r in ws.iter_rows(values_only=True) if any(v is not None for v in r)]
             if rows:
-                header = ["" if v is None else str(v) for v in rows[0]]
-                parts.append("| " + " | ".join(header) + " |")
-                parts.append("| " + " | ".join(["---"] * len(header)) + " |")
-                for r in rows[1:]:
-                    parts.append("| " + " | ".join("" if v is None else str(v) for v in r) + " |")
-                parts.append("")
+                rows_grid = [["" if v is None else str(v) for v in r] for r in rows]
+                parts.append(_format_md_table(rows_grid) + "\n")
         md_text = "\n".join(parts)
 
     elif input_fmt == "pdf":
-        docx_data, _, _, _ = pdf_to_docx(data_bytes, base_name)
-        return any_to_md(docx_data, "docx", base_name)
+        return pdf_to_md(data_bytes, base_name)
 
     elif input_fmt == "pptx":
         docx_data, _, _, _ = pptx_to_docx(data_bytes, base_name)
@@ -1799,10 +2778,12 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #1e293b; }}
     h1, h2, h3 {{ color: #0f172a; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }}
-    table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 20px 0; display: block; overflow-x: auto; }}
     th, td {{ border: 1px solid #cbd5e1; padding: 8px 12px; text-align: left; }}
     th {{ background: #f1f5f9; font-weight: 600; }}
     code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: monospace; }}
+    pre {{ background: #f1f5f9; padding: 14px 16px; border-radius: 6px; overflow-x: auto; border: 1px solid #e2e8f0; }}
+    pre code {{ background: none; padding: 0; }}
   </style>
 </head>
 <body>
@@ -2317,5 +3298,5 @@ def preview_pdf_pages(pdf_bytes: bytes, max_pages: int = 15, dpi: int = 130) -> 
         }
     finally:
         doc.close()
-        gc.collect()
+        _release_pdf_memory()
 

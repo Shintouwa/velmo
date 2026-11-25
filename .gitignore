@@ -18,6 +18,7 @@ sample_mixed*
 sample_multisheet*
 test_transparent*
 stress_fixtures/
+qa_torture/
 
 # Temporary & cache files
 *.tmp
