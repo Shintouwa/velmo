@@ -635,6 +635,21 @@ def xlsx_to_docx(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", len(wb_data.worksheets)
 
 
+def _reset_style_list_counters(list_counters: Dict[Tuple[str, int], int]) -> None:
+    """Resets style-based list counters when entering a new heading section."""
+    for key in [k for k in list_counters if k[0] in ("style_number", "style_bullet")]:
+        del list_counters[key]
+
+
+def _next_ordered_list_num(list_counters: Dict[Tuple[str, int], int], num_id: str, ilvl: int) -> int:
+    """Increments an ordered list counter at ilvl and resets any deeper sub-level counters."""
+    for key in [k for k in list_counters if k[0] == num_id and k[1] > ilvl]:
+        del list_counters[key]
+    key = (num_id, ilvl)
+    list_counters[key] = list_counters.get(key, 0) + 1
+    return list_counters[key]
+
+
 def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
     doc = Document(io.BytesIO(docx_bytes))
     wb = openpyxl.Workbook()
@@ -663,6 +678,8 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
             p = Paragraph(child, doc)
             style_name = p.style.name if p.style else "Normal"
             hl = p_info["heading_level"]
+            if hl > 0:
+                _reset_style_list_counters(list_counters)
             is_heading = (
                 hl > 0
                 or style_name.startswith("Heading")
@@ -674,9 +691,8 @@ def docx_to_xlsx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                 ilvl = li["ilvl"]
                 indent = "  " * ilvl
                 if li["ordered"]:
-                    key = (li["num_id"], ilvl)
-                    list_counters[key] = list_counters.get(key, 0) + 1
-                    display_text = f"{indent}{list_counters[key]}. {text}"
+                    num_val = _next_ordered_list_num(list_counters, li["num_id"], ilvl)
+                    display_text = f"{indent}{num_val}. {text}"
                 else:
                     bullet = "•" if ilvl == 0 else ("◦" if ilvl == 1 else "▪")
                     display_text = f"{indent}{bullet} {text}"
@@ -2161,6 +2177,8 @@ def _docx_to_pdf_reportlab(docx_bytes: bytes) -> bytes:
                 else:
                     markup = _segments_to_rl_markup(info["segments"], mono_family)
                     hl = info["heading_level"]
+                    if hl > 0:
+                        _reset_style_list_counters(list_counters)
                     if hl == 1:
                         st = ParagraphStyle("H1Dyn", parent=h1_style, alignment=info["align"])
                         story.append(RLParagraph(markup, st))
@@ -2177,9 +2195,8 @@ def _docx_to_pdf_reportlab(docx_bytes: bytes) -> bytes:
                         li = info["list_info"]
                         ilvl = li["ilvl"]
                         if li["ordered"]:
-                            key = (li["num_id"], ilvl)
-                            list_counters[key] = list_counters.get(key, 0) + 1
-                            prefix = f"{list_counters[key]}. "
+                            num_val = _next_ordered_list_num(list_counters, li["num_id"], ilvl)
+                            prefix = f"{num_val}. "
                         else:
                             bullets = ["• ", "◦ ", "▪ "]
                             prefix = bullets[min(ilvl, 2)]
@@ -2647,15 +2664,15 @@ def _pptx_to_pdf_reportlab(pptx_bytes: bytes) -> bytes:
 
 def _estimate_textbox_height_in(lines_info: List[Tuple[str, float]], width_in: float) -> float:
     """Estimates vertical height (inches) needed by wrapped paragraphs inside a PPTX textbox."""
-    total_h = 0.10
+    total_h = 0.06
     for text, pt in lines_info:
-        chars_per_line = max(int(width_in * 10.2 * (12.0 / max(pt, 7.0))), 24)
+        chars_per_line = max(int(width_in * 10.6 * (12.0 / max(pt, 7.0))), 24)
         sub_lines = text.split("\n")
         wrapped = 0
         for sl in sub_lines:
             wrapped += max(1, (len(sl) + chars_per_line - 1) // chars_per_line)
-        line_h_in = (pt * 1.35) / 72.0
-        total_h += wrapped * line_h_in + (pt * 0.45) / 72.0
+        line_h_in = (pt * 1.24) / 72.0
+        total_h += wrapped * line_h_in + (pt * 0.28) / 72.0
     return total_h
 
 
@@ -2772,23 +2789,38 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
     top_body_in = 1.05
     max_y_in = 7.08
 
+    body_items: List[Tuple[str, Any]] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith('p'):
+            body_items.append(('p', _extract_oxml_paragraph_data(child, doc)))
+        elif child.tag.endswith('tbl'):
+            body_items.append(('tbl', Table(child, doc)))
+
+    doc_cover_title = "Document Overview"
+    for b_kind, b_data in body_items[:6]:
+        if b_kind == 'p' and b_data["heading_level"] > 0 and b_data["plain_text"].strip():
+            doc_cover_title = b_data["plain_text"].strip()
+            break
+
     current_slide = None
     current_title_shape = None
     slide_count = 0
-    current_title = "Document Overview"
+    current_title = doc_cover_title
     cur_y_in = top_body_in
     slide_has_table_or_img = False
+    has_cover_logo_only = False
     para_buffer: List[dict] = []
     list_counters: Dict[Tuple[str, int], int] = {}
 
     def start_new_slide(title: str = "Slide", flush: bool = True):
-        nonlocal current_slide, current_title_shape, slide_count, current_title, cur_y_in, slide_has_table_or_img
+        nonlocal current_slide, current_title_shape, slide_count, current_title, cur_y_in, slide_has_table_or_img, has_cover_logo_only
         if flush:
             flush_para_buffer()
         current_slide = prs.slides.add_slide(blank_layout)
         slide_count += 1
         current_title = title.strip() or f"Slide {slide_count}"
         slide_has_table_or_img = False
+        has_cover_logo_only = False
 
         t_box = current_slide.shapes.add_textbox(
             Inches(margin_x_in), Inches(0.30), Inches(content_w_in), Inches(0.65)
@@ -2812,7 +2844,7 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
         idx = 0
         while idx < len(para_buffer):
             avail_h_in = max_y_in - cur_y_in
-            if avail_h_in < 0.75:
+            if avail_h_in < 0.50:
                 start_new_slide(f"{current_title} (cont.)" if "(cont.)" not in current_title else current_title, flush=False)
                 avail_h_in = max_y_in - cur_y_in
 
@@ -2820,7 +2852,7 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
             first = para_buffer[idx]
             is_box = first["kind"] in ("code", "callout")
             chunk: List[dict] = []
-            used_h = 0.12
+            used_h = 0.08
 
             while idx < len(para_buffer):
                 item = para_buffer[idx]
@@ -2836,14 +2868,27 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                 if item_is_box:
                     break
 
-            box_h_in = min(max(used_h + 0.08, 0.38), avail_h_in)
+            # Keep trailing heading / Listing labels paired with the following code/list/paragraph
+            if idx < len(para_buffer) and chunk and chunk[-1].get("keep_with_next"):
+                has_prefix = any(not c.get("keep_with_next") for c in chunk)
+                if has_prefix or cur_y_in > top_body_in + 0.2:
+                    while chunk and chunk[-1].get("keep_with_next"):
+                        if not has_prefix and len(chunk) == 0:
+                            break
+                        chunk.pop()
+                        idx -= 1
+                    if not chunk:
+                        start_new_slide(f"{current_title} (cont.)" if "(cont.)" not in current_title else current_title, flush=False)
+                        continue
+
+            box_h_in = min(max(used_h + 0.06, 0.34), avail_h_in)
             tb = current_slide.shapes.add_textbox(
                 Inches(margin_x_in), Inches(cur_y_in), Inches(content_w_in), Inches(box_h_in)
             )
             tf = tb.text_frame
             tf.word_wrap = True
-            tf.margin_top = Pt(3)
-            tf.margin_bottom = Pt(3)
+            tf.margin_top = Pt(2.5)
+            tf.margin_bottom = Pt(2.5)
             tf.margin_left = Pt(6 if is_box else 2)
             tf.margin_right = Pt(6 if is_box else 2)
 
@@ -2854,7 +2899,7 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
 
             for p_i, item in enumerate(chunk):
                 p = tf.paragraphs[0] if p_i == 0 else tf.add_paragraph()
-                p.space_after = Pt(4)
+                p.space_after = Pt(2.5)
                 p.level = item.get("level", 0)
                 if item.get("prefix"):
                     r_pre = p.add_run()
@@ -2883,13 +2928,21 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                     else:
                         r.font.color.rgb = RGBColor(15, 23, 42) if item.get("bold") else RGBColor(51, 65, 85)
 
-            cur_y_in += box_h_in + 0.08
+            cur_y_in += box_h_in + 0.06
 
         para_buffer.clear()
 
-    for child in doc.element.body.iterchildren():
-        if child.tag.endswith('p'):
-            info = _extract_oxml_paragraph_data(child, doc)
+    def _is_caption_para(p_data: dict) -> bool:
+        t = p_data["plain_text"].strip()
+        if not t or p_data["images"] or p_data["heading_level"] > 0 or p_data["list_info"] is not None or p_data["is_callout"]:
+            return False
+        if len(t) > 180:
+            return False
+        return t.startswith(("Figure ", "Plate ", "Chart ", "Diagram ", "Table ")) or any(s.get("italic") for s in p_data["segments"])
+
+    for b_idx, (b_kind, b_data) in enumerate(body_items):
+        if b_kind == 'p':
+            info = b_data
             text = info["plain_text"].strip()
 
             if info["page_break_before"] and current_slide is not None:
@@ -2912,35 +2965,70 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                     flat_bytes, iw, ih = _flatten_image_for_reportlab(rel_part.blob)
                     target_w_in = (cx_pt / 72.0) if cx_pt else content_w_in * 0.8
                     target_h_in = (cy_pt / 72.0) if cy_pt else target_w_in * (ih / iw)
-                    scale = min(content_w_in / max(target_w_in, 0.1), avail_h_in / max(target_h_in, 0.1), 1.35)
-                    # Cap upscaling so small logos stay crisp and large plates fit
-                    if target_h_in * scale > avail_h_in:
-                        scale = avail_h_in / max(target_h_in, 0.1)
+
+                    is_cover_logo = (
+                        slide_count == 1
+                        and not slide_has_table_or_img
+                        and not para_buffer
+                        and cur_y_in <= top_body_in + 0.05
+                        and target_h_in <= 1.25
+                        and b_idx <= 2
+                    )
+
+                    # Reserve space below the image if a caption follows right after
+                    reserve_cap = 0.0
+                    if not is_cover_logo and b_idx + 1 < len(body_items) and body_items[b_idx + 1][0] == 'p':
+                        if _is_caption_para(body_items[b_idx + 1][1]):
+                            reserve_cap = 0.85
+
+                    eff_avail_h = max(avail_h_in - reserve_cap, 1.5) if avail_h_in > 2.35 else avail_h_in
+                    max_scale = 1.05 if is_cover_logo else 1.35
+                    scale = min(content_w_in / max(target_w_in, 0.1), eff_avail_h / max(target_h_in, 0.1), max_scale)
+                    if target_h_in * scale > eff_avail_h:
+                        scale = eff_avail_h / max(target_h_in, 0.1)
                     if target_w_in * scale > content_w_in:
                         scale = content_w_in / max(target_w_in, 0.1)
+
                     box_w = Inches(min(content_w_in, max(target_w_in * scale, 1.0)))
-                    box_h = Inches(min(avail_h_in, max(target_h_in * scale, 0.7)))
-                    box_left = Inches(margin_x_in) + int((Inches(content_w_in) - box_w) / 2)
+                    box_h = Inches(min(eff_avail_h, max(target_h_in * scale, 0.65)))
+                    box_left = Inches(margin_x_in) if is_cover_logo else (Inches(margin_x_in) + int((Inches(content_w_in) - box_w) / 2))
                     _add_aspect_fit_picture(current_slide, flat_bytes, box_left, Inches(cur_y_in), box_w, box_h)
                     cur_y_in += (box_h / Inches(1)) + 0.10
-                    slide_has_table_or_img = True
+                    if is_cover_logo:
+                        has_cover_logo_only = True
+                    else:
+                        slide_has_table_or_img = True
                 except Exception as img_err:
                     logger.warning(f"DOCX->PPTX image render failed for {rid}: {img_err}")
 
             if text:
                 hl = info["heading_level"]
+                if hl > 0:
+                    _reset_style_list_counters(list_counters)
+
+                next_is_code = (
+                    b_idx + 1 < len(body_items)
+                    and body_items[b_idx + 1][0] == 'p'
+                    and body_items[b_idx + 1][1]["is_mono_block"]
+                )
+
                 if hl == 1:
-                    if current_slide is not None and (cur_y_in > top_body_in + 0.05 or para_buffer or slide_has_table_or_img):
+                    if has_cover_logo_only:
+                        current_title = text
+                        if current_title_shape is not None:
+                            current_title_shape.text_frame.paragraphs[0].text = text[:120]
+                        has_cover_logo_only = False
+                    elif current_slide is not None and (cur_y_in > top_body_in + 0.05 or para_buffer or slide_has_table_or_img):
                         start_new_slide(text)
                     else:
                         if current_slide is None:
                             start_new_slide(text)
                         else:
-                            # Replace empty slide title
                             current_title = text
                             if current_title_shape is not None:
                                 current_title_shape.text_frame.paragraphs[0].text = text[:120]
                 elif hl == 2:
+                    has_cover_logo_only = False
                     flush_para_buffer()
                     if current_slide is None or cur_y_in > 2.35 or slide_has_table_or_img:
                         start_new_slide(text)
@@ -2952,8 +3040,10 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                             "pt": 15.0,
                             "bold": True,
                             "level": 0,
+                            "keep_with_next": True,
                         })
                 elif hl >= 3:
+                    has_cover_logo_only = False
                     para_buffer.append({
                         "kind": "heading",
                         "text": text,
@@ -2961,8 +3051,10 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                         "pt": 13.0 if hl == 3 else 11.5,
                         "bold": True,
                         "level": 0,
+                        "keep_with_next": True,
                     })
                 elif info["is_mono_block"]:
+                    has_cover_logo_only = False
                     para_buffer.append({
                         "kind": "code",
                         "text": info["plain_text"].strip("\n"),
@@ -2972,6 +3064,7 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                         "bg": "F1F5F9",
                     })
                 elif info["is_callout"]:
+                    has_cover_logo_only = False
                     para_buffer.append({
                         "kind": "callout",
                         "text": text,
@@ -2981,12 +3074,12 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                         "bg": info["callout_bg"] or "EFF6FF",
                     })
                 elif info["list_info"] is not None:
+                    has_cover_logo_only = False
                     li = info["list_info"]
                     ilvl = li["ilvl"]
                     if li["ordered"]:
-                        key = (li["num_id"], ilvl)
-                        list_counters[key] = list_counters.get(key, 0) + 1
-                        prefix = f"{list_counters[key]}. "
+                        num_val = _next_ordered_list_num(list_counters, li["num_id"], ilvl)
+                        prefix = f"{num_val}. "
                     else:
                         prefix = "• " if ilvl == 0 else ("◦ " if ilvl == 1 else "▪ ")
                     para_buffer.append({
@@ -2999,6 +3092,7 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                         "level": min(ilvl, 2),
                     })
                 else:
+                    has_cover_logo_only = False
                     para_buffer.append({
                         "kind": "body",
                         "text": text,
@@ -3006,26 +3100,42 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
                         "pt": 11.5,
                         "bold": False,
                         "level": 0,
+                        "keep_with_next": next_is_code,
                     })
 
             if (info["inline_page_breaks"] > 0 or info["has_section_break"]) and current_slide is not None:
                 flush_para_buffer()
-                # Prepare cleanly for next slide only if more content follows
                 current_slide = None
 
-        elif child.tag.endswith('tbl'):
+        elif b_kind == 'tbl':
+            has_cover_logo_only = False
+            # Separate trailing keep_with_next headings so a table heading never gets stranded on the previous slide
+            trailing_keep: List[dict] = []
+            while para_buffer and para_buffer[-1].get("keep_with_next"):
+                trailing_keep.insert(0, para_buffer.pop())
+
             flush_para_buffer()
-            tbl = Table(child, doc)
+            if current_slide is None:
+                start_new_slide(current_title, flush=False)
+
+            avail_h_in = max_y_in - cur_y_in
+            needed_min_h = 2.0 + (0.45 * len(trailing_keep))
+            if avail_h_in < needed_min_h or slide_has_table_or_img:
+                start_new_slide(current_title, flush=False)
+                avail_h_in = max_y_in - cur_y_in
+
+            if trailing_keep:
+                para_buffer.extend(trailing_keep)
+                flush_para_buffer()
+                avail_h_in = max_y_in - cur_y_in
+
+            tbl = b_data
             raw_rows, span_cmds, repeat_hdr_rows, grid_widths = _extract_docx_table_grid_and_spans(tbl, doc)
             if not raw_rows:
                 continue
 
-            if current_slide is None:
-                start_new_slide(current_title)
-
-            avail_h_in = max_y_in - cur_y_in
             if avail_h_in < 1.8 or slide_has_table_or_img:
-                start_new_slide(current_title)
+                start_new_slide(current_title, flush=False)
                 avail_h_in = max_y_in - cur_y_in
 
             num_cols = len(raw_rows[0])
@@ -3665,6 +3775,7 @@ def _docx_to_txt(docx_bytes: bytes) -> str:
             if plain:
                 txt_line = _segments_to_txt(info["segments"]).strip()
                 if info["heading_level"] > 0:
+                    _reset_style_list_counters(list_counters)
                     parts.append(f"\n{txt_line}")
                 elif info["is_mono_block"]:
                     parts.append("\n" + info["plain_text"].strip("\n") + "\n")
@@ -3673,9 +3784,8 @@ def _docx_to_txt(docx_bytes: bytes) -> str:
                     ilvl = li["ilvl"]
                     indent = "  " * ilvl
                     if li["ordered"]:
-                        key = (li["num_id"], ilvl)
-                        list_counters[key] = list_counters.get(key, 0) + 1
-                        parts.append(f"{indent}{list_counters[key]}. {txt_line}")
+                        num_val = _next_ordered_list_num(list_counters, li["num_id"], ilvl)
+                        parts.append(f"{indent}{num_val}. {txt_line}")
                     else:
                         parts.append(f"{indent}- {txt_line}")
                 else:
@@ -4224,6 +4334,7 @@ def _docx_to_md(docx_bytes: bytes) -> str:
                 hl = info["heading_level"]
                 if hl > 0:
                     close_list_block()
+                    _reset_style_list_counters(list_counters)
                     h_md = _segments_to_md(info["segments"], include_inline_styles=False).strip()
                     parts.append(f"{'#' * min(hl, 6)} {h_md}\n")
                 elif info["is_mono_block"]:
@@ -4241,9 +4352,8 @@ def _docx_to_md(docx_bytes: bytes) -> str:
                     indent = "  " * ilvl
                     item_md = _segments_to_md(info["segments"], include_inline_styles=True).strip()
                     if li["ordered"]:
-                        key = (li["num_id"], ilvl)
-                        list_counters[key] = list_counters.get(key, 0) + 1
-                        parts.append(f"{indent}{list_counters[key]}. {item_md}")
+                        num_val = _next_ordered_list_num(list_counters, li["num_id"], ilvl)
+                        parts.append(f"{indent}{num_val}. {item_md}")
                     else:
                         parts.append(f"{indent}- {item_md}")
                     in_list_block = True
@@ -4372,12 +4482,14 @@ def _docx_to_html_body(docx_bytes: bytes) -> str:
     """Converts a DOCX file into rich responsive HTML5 body content including embedded images, merges, lists, code, callouts, and links."""
     doc = Document(io.BytesIO(docx_bytes))
     parts: List[str] = []
-    list_stack: List[Tuple[str, int]] = []
+    list_stack: List[List[Any]] = []
 
     def close_lists(target_level: int = -1, next_tag: Optional[str] = None):
         while list_stack:
-            top_tag, top_lvl = list_stack[-1]
+            top_tag, top_lvl, open_li = list_stack[-1]
             if top_lvl > target_level or (top_lvl == target_level and next_tag is not None and top_tag != next_tag):
+                if open_li:
+                    parts.append("</li>")
                 parts.append(f"</{top_tag}>")
                 list_stack.pop()
             else:
@@ -4457,9 +4569,13 @@ def _docx_to_html_body(docx_bytes: bytes) -> str:
                     close_lists(ilvl, tag)
                     if not list_stack or list_stack[-1][1] < ilvl:
                         parts.append(f"<{tag}>")
-                        list_stack.append((tag, ilvl))
+                        list_stack.append([tag, ilvl, False])
+                    elif list_stack[-1][2]:
+                        parts.append("</li>")
+                        list_stack[-1][2] = False
                     item_html = _segments_to_html(info["segments"], include_inline_styles=True).strip()
-                    parts.append(f"<li>{item_html}</li>")
+                    parts.append(f"<li>{item_html}")
+                    list_stack[-1][2] = True
                 else:
                     close_lists()
                     align_style = ""
