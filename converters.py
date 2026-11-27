@@ -1,5 +1,7 @@
 import base64
 import csv
+import datetime
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import gc
 import html
 import io
@@ -24,12 +26,17 @@ from PIL import Image
 import img2pdf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.datetime import from_excel as xl_from_excel
 
 from docx import Document
-from docx.enum.section import WD_ORIENTATION
+from docx.enum.section import WD_ORIENTATION, WD_SECTION
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.opc.constants import RELATIONSHIP_TYPE as DOCX_RT
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
+from docx.shared import Inches as DocxInches, Pt as DocxPt, RGBColor as DocxRGBColor
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
@@ -560,79 +567,1078 @@ def images_to_pdf(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple[
     return pdf_bytes, "application/pdf", out_name, len(image_list)
 
 
-# --- Word & Excel Core Converters ---
+# --- Shared XLSX Parsing, Formula Evaluation & Formatting Helpers ---
 
-def xlsx_to_docx(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+_XLSX_THEME_COLORS = [
+    "FFFFFF", "000000", "EEECE1", "1F497D", "4F81BD",
+    "C0504D", "9BBB59", "8064A2", "4BACC6", "F79646",
+]
+
+_XLSX_INDEXED_COLORS = {
+    0: "000000", 1: "FFFFFF", 2: "FF0000", 3: "00FF00", 4: "0000FF", 5: "FFFF00", 6: "FF00FF", 7: "00FFFF",
+    8: "000000", 9: "FFFFFF", 10: "FF0000", 11: "00FF00", 12: "0000FF", 13: "FFFF00", 14: "FF00FF", 15: "00FFFF",
+    16: "800000", 17: "008000", 18: "000080", 19: "808000", 20: "800080", 21: "008080", 22: "C0C0C0", 23: "808080",
+    24: "9999FF", 25: "993366", 26: "FFFFCC", 27: "CCFFFF", 28: "660066", 29: "FF8080", 30: "0066CC", 31: "CCCCFF",
+    40: "00CCFF", 41: "CCFFFF", 42: "CCFFCC", 43: "FFFF99", 44: "99CCFF", 45: "FF99CC", 46: "CC99FF", 47: "FFCC99",
+    48: "3366FF", 49: "33CCCC", 50: "99CC00", 51: "FFCC00", 52: "FF9900", 53: "FF6600", 54: "666699", 55: "969696",
+    56: "003366", 57: "339966", 58: "003300", 59: "333300", 60: "993300", 61: "993366", 62: "333399", 63: "333333",
+}
+
+
+def _apply_excel_tint(hex_rgb: str, tint: float) -> str:
+    """Applies an Excel theme tint (-1.0 to 1.0) to a 6-char RGB hex string."""
+    if not tint:
+        return hex_rgb
+    r = int(hex_rgb[0:2], 16)
+    g = int(hex_rgb[2:4], 16)
+    b = int(hex_rgb[4:6], 16)
+    if tint < 0:
+        factor = 1.0 + tint
+        r, g, b = int(round(r * factor)), int(round(g * factor)), int(round(b * factor))
+    else:
+        r = int(round(r + (255 - r) * tint))
+        g = int(round(g + (255 - g) * tint))
+        b = int(round(b + (255 - b) * tint))
+    r = max(0, min(255, r))
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
+    return f"{r:02X}{g:02X}{b:02X}"
+
+
+def _extract_xlsx_color_hex(color_obj, is_fill: bool = False) -> Optional[str]:
+    """Extracts a 6-char hex color from an openpyxl Color (rgb, theme+tint, or indexed)."""
+    if color_obj is None:
+        return None
+    ctype = getattr(color_obj, "type", None)
+    rgb = getattr(color_obj, "rgb", None)
+    if ctype == "rgb" and isinstance(rgb, str):
+        if len(rgb) == 8 and rgb.upper().startswith("00"):
+            return None
+        hex_code = rgb[-6:].upper() if len(rgb) >= 6 else ""
+        if re.match(r"^[0-9A-F]{6}$", hex_code):
+            return hex_code
+    if ctype == "theme":
+        t_idx = getattr(color_obj, "theme", None)
+        if isinstance(t_idx, int) and 0 <= t_idx < len(_XLSX_THEME_COLORS):
+            tint = float(getattr(color_obj, "tint", 0.0) or 0.0)
+            return _apply_excel_tint(_XLSX_THEME_COLORS[t_idx], tint)
+    if ctype == "indexed":
+        idx = getattr(color_obj, "indexed", None)
+        if isinstance(idx, int) and idx in _XLSX_INDEXED_COLORS:
+            return _XLSX_INDEXED_COLORS[idx]
+    if isinstance(rgb, str) and len(rgb) >= 6:
+        if len(rgb) == 8 and rgb.upper().startswith("00"):
+            return None
+        hex_code = rgb[-6:].upper()
+        if re.match(r"^[0-9A-F]{6}$", hex_code):
+            if is_fill and hex_code == "000000" and getattr(color_obj, "theme", None) is None:
+                return None
+            return hex_code
+    return None
+
+
+class _FormulaFallback(Exception):
+    """Raised when an Excel formula uses unsupported syntax so the caller keeps the raw formula string."""
+
+
+def _split_formula_top_level(expr: str, sep: str = ",") -> List[str]:
+    """Splits an Excel formula expression on top-level separator outside parentheses and quotes."""
+    parts: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    in_dq = False
+    in_sq = False
+    i = 0
+    n = len(expr)
+    while i < n:
+        ch = expr[i]
+        if ch == '"' and not in_sq:
+            if in_dq and i + 1 < n and expr[i + 1] == '"':
+                buf.append('""')
+                i += 2
+                continue
+            in_dq = not in_dq
+            buf.append(ch)
+        elif ch == "'" and not in_dq:
+            in_sq = not in_sq
+            buf.append(ch)
+        elif not in_dq and not in_sq:
+            if ch == "(":
+                depth += 1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+            elif depth == 0 and expr.startswith(sep, i):
+                parts.append("".join(buf).strip())
+                buf = []
+                i += len(sep)
+                continue
+            buf.append(ch)
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf).strip())
+    return parts
+
+
+def _parse_cell_coord(coord_str: str) -> Tuple[int, int]:
+    """Parses '$B$5' or 'B5' into (row_1idx, col_1idx)."""
+    clean = coord_str.replace("$", "").strip().upper()
+    m = re.match(r"^([A-Z]{1,3})(\d+)$", clean)
+    if not m:
+        raise _FormulaFallback(coord_str)
+    return int(m.group(2)), column_index_from_string(m.group(1))
+
+
+def _resolve_xlsx_cell_value(
+    sheet_title: str,
+    row: int,
+    col: int,
+    wb_data,
+    wb_raw,
+    memo: Dict[Tuple[str, int, int], Any],
+    visiting: Set[Tuple[str, int, int]],
+) -> Any:
+    """Returns cached value when available, or evaluates uncached standard formulas safely."""
+    key = (sheet_title, row, col)
+    if key in memo:
+        return memo[key]
+    if sheet_title not in wb_raw.sheetnames:
+        raise _FormulaFallback(sheet_title)
+
+    c_data = wb_data[sheet_title].cell(row=row, column=col)
+    if c_data.value is not None:
+        memo[key] = c_data.value
+        return c_data.value
+
+    c_raw = wb_raw[sheet_title].cell(row=row, column=col)
+    raw_val = c_raw.value
+    if not (isinstance(raw_val, str) and raw_val.startswith("=")):
+        memo[key] = raw_val
+        return raw_val
+
+    if key in visiting:
+        return raw_val
+    visiting.add(key)
+    try:
+        res = _eval_formula_expr(raw_val[1:].strip(), sheet_title, wb_data, wb_raw, memo, visiting)
+        memo[key] = res
+        return res
+    except _FormulaFallback:
+        memo[key] = raw_val
+        return raw_val
+    except Exception:
+        memo[key] = raw_val
+        return raw_val
+    finally:
+        visiting.discard(key)
+
+
+def _expand_range_ref(
+    token: str,
+    cur_sheet: str,
+    wb_data,
+    wb_raw,
+    memo: Dict[Tuple[str, int, int], Any],
+    visiting: Set[Tuple[str, int, int]],
+) -> List[Any]:
+    """Expands 'A1:B5' or 'Sheet!A1:B5' into a flat list of evaluated cell values."""
+    t = token.strip()
+    target_sheet = cur_sheet
+    if "!" in t:
+        s_part, ref_part = t.split("!", 1)
+        s_clean = s_part.strip()
+        if len(s_clean) >= 2 and s_clean[0] == "'" and s_clean[-1] == "'":
+            s_clean = s_clean[1:-1].replace("''", "'")
+        target_sheet = s_clean
+        t = ref_part.strip()
+
+    if ":" not in t:
+        r, c = _parse_cell_coord(t)
+        return [_resolve_xlsx_cell_value(target_sheet, r, c, wb_data, wb_raw, memo, visiting)]
+
+    left_ref, right_ref = t.split(":", 1)
+    r1, c1 = _parse_cell_coord(left_ref)
+    r2, c2 = _parse_cell_coord(right_ref)
+    if r1 > r2:
+        r1, r2 = r2, r1
+    if c1 > c2:
+        c1, c2 = c2, c1
+    if (r2 - r1 + 1) * (c2 - c1 + 1) > 20000:
+        raise _FormulaFallback(token)
+    vals: List[Any] = []
+    for rr in range(r1, r2 + 1):
+        for cc in range(c1, c2 + 1):
+            vals.append(_resolve_xlsx_cell_value(target_sheet, rr, cc, wb_data, wb_raw, memo, visiting))
+    return vals
+
+
+def _to_number(v: Any) -> float:
+    if isinstance(v, bool):
+        return 1.0 if v else 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, str):
+        try:
+            return float(v.replace(",", "").strip())
+        except ValueError:
+            pass
+    raise _FormulaFallback(str(v))
+
+
+def _eval_formula_expr(
+    expr: str,
+    cur_sheet: str,
+    wb_data,
+    wb_raw,
+    memo: Dict[Tuple[str, int, int], Any],
+    visiting: Set[Tuple[str, int, int]],
+) -> Any:
+    """Lightweight pure-Python evaluator for common Excel formulas (SUM, AVERAGE, IF, cross-sheet refs, arithmetic)."""
+    s = expr.strip()
+    if not s:
+        raise _FormulaFallback("empty")
+
+    # Strip matching outer parentheses
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        in_dq = False
+        in_sq = False
+        matched = True
+        for idx, ch in enumerate(s):
+            if ch == '"' and not in_sq:
+                in_dq = not in_dq
+            elif ch == "'" and not in_dq:
+                in_sq = not in_sq
+            elif not in_dq and not in_sq:
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and idx < len(s) - 1:
+                        matched = False
+                        break
+        if matched:
+            s = s[1:-1].strip()
+        else:
+            break
+
+    # 1. Comparisons (lowest precedence)
+    for op in (">=", "<=", "<>", "!=", "=", ">", "<"):
+        parts = _split_formula_top_level(s, op)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            lv = _eval_formula_expr(parts[0], cur_sheet, wb_data, wb_raw, memo, visiting)
+            rv = _eval_formula_expr(parts[1], cur_sheet, wb_data, wb_raw, memo, visiting)
+            if isinstance(lv, str) and isinstance(rv, str):
+                lcmp, rcmp = lv.lower(), rv.lower()
+            else:
+                lcmp, rcmp = _to_number(lv), _to_number(rv)
+            if op == "=":
+                return lcmp == rcmp
+            if op in ("<>", "!="):
+                return lcmp != rcmp
+            if op == ">":
+                return lcmp > rcmp
+            if op == "<":
+                return lcmp < rcmp
+            if op == ">=":
+                return lcmp >= rcmp
+            if op == "<=":
+                return lcmp <= rcmp
+
+    # 2. String concatenation '&'
+    amp_parts = _split_formula_top_level(s, "&")
+    if len(amp_parts) > 1:
+        out_parts: List[str] = []
+        for p in amp_parts:
+            v = _eval_formula_expr(p, cur_sheet, wb_data, wb_raw, memo, visiting)
+            out_parts.append("" if v is None else str(v))
+        return "".join(out_parts)
+
+    # 3. Addition / Subtraction outside parens/quotes/scientific notation
+    depth = 0
+    in_dq = False
+    in_sq = False
+    for idx in range(len(s) - 1, 0, -1):
+        ch = s[idx]
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif not in_dq and not in_sq:
+            if ch == ")":
+                depth += 1
+            elif ch == "(":
+                depth -= 1
+            elif depth == 0 and ch in ("+", "-"):
+                prev = s[:idx].rstrip()
+                if prev and prev[-1] not in ("+", "-", "*", "/", "(", ",", "=", ">", "<", "&") and not prev.lower().endswith("e"):
+                    lv = _to_number(_eval_formula_expr(prev, cur_sheet, wb_data, wb_raw, memo, visiting))
+                    rv = _to_number(_eval_formula_expr(s[idx + 1:], cur_sheet, wb_data, wb_raw, memo, visiting))
+                    return (lv + rv) if ch == "+" else (lv - rv)
+
+    # 4. Multiplication / Division
+    depth = 0
+    in_dq = False
+    in_sq = False
+    for idx in range(len(s) - 1, 0, -1):
+        ch = s[idx]
+        if ch == '"' and not in_sq:
+            in_dq = not in_dq
+        elif ch == "'" and not in_dq:
+            in_sq = not in_sq
+        elif not in_dq and not in_sq:
+            if ch == ")":
+                depth += 1
+            elif ch == "(":
+                depth -= 1
+            elif depth == 0 and ch in ("*", "/"):
+                lv = _to_number(_eval_formula_expr(s[:idx], cur_sheet, wb_data, wb_raw, memo, visiting))
+                rv = _to_number(_eval_formula_expr(s[idx + 1:], cur_sheet, wb_data, wb_raw, memo, visiting))
+                if ch == "*":
+                    return lv * rv
+                if rv == 0:
+                    raise _FormulaFallback("div0")
+                return lv / rv
+
+    # Unary +/-
+    if s[0] == "-":
+        return -_to_number(_eval_formula_expr(s[1:], cur_sheet, wb_data, wb_raw, memo, visiting))
+    if s[0] == "+":
+        return _to_number(_eval_formula_expr(s[1:], cur_sheet, wb_data, wb_raw, memo, visiting))
+
+    # 5. Literals
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        return s[1:-1].replace('""', '"')
+    if s.upper() == "TRUE":
+        return True
+    if s.upper() == "FALSE":
+        return False
+    if re.match(r"^\d+(\.\d+)?$", s):
+        return int(s) if "." not in s else float(s)
+
+    # 6. Function Call
+    m_fn = re.match(r"^([A-Z0-9_.]+)\((.*)\)$", s, re.DOTALL | re.I)
+    if m_fn:
+        fn_name = m_fn.group(1).upper()
+        arg_str = m_fn.group(2).strip()
+        args = _split_formula_top_level(arg_str, ",") if arg_str else []
+
+        if fn_name == "IF":
+            if len(args) < 2:
+                raise _FormulaFallback(s)
+            cond = _eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting)
+            truthy = bool(cond) if not isinstance(cond, str) else (cond.strip().upper() not in ("", "FALSE", "0"))
+            if truthy:
+                return _eval_formula_expr(args[1], cur_sheet, wb_data, wb_raw, memo, visiting)
+            return _eval_formula_expr(args[2], cur_sheet, wb_data, wb_raw, memo, visiting) if len(args) >= 3 else False
+
+        if fn_name == "TODAY":
+            return datetime.date.today()
+
+        def _collect_args(numeric_only: bool = True) -> List[Any]:
+            out_vals: List[Any] = []
+            for a in args:
+                a_st = a.strip()
+                if re.match(r"^(?:(?:'[^']+'|[A-Za-z0-9_]+)!)?\$?[A-Z]{1,3}\$?\d+:\$?[A-Z]{1,3}\$?\d+$", a_st):
+                    expanded = _expand_range_ref(a_st, cur_sheet, wb_data, wb_raw, memo, visiting)
+                else:
+                    expanded = [_eval_formula_expr(a_st, cur_sheet, wb_data, wb_raw, memo, visiting)]
+                for item in expanded:
+                    if numeric_only:
+                        if isinstance(item, (int, float)) and not isinstance(item, bool):
+                            out_vals.append(float(item))
+                    else:
+                        if item is not None and str(item) != "":
+                            out_vals.append(item)
+            return out_vals
+
+        if fn_name == "SUM":
+            return sum(_collect_args(True))
+        if fn_name in ("AVERAGE", "AVG"):
+            nums = _collect_args(True)
+            if not nums:
+                raise _FormulaFallback(s)
+            return sum(nums) / len(nums)
+        if fn_name == "MIN":
+            nums = _collect_args(True)
+            if not nums:
+                raise _FormulaFallback(s)
+            return min(nums)
+        if fn_name == "MAX":
+            nums = _collect_args(True)
+            if not nums:
+                raise _FormulaFallback(s)
+            return max(nums)
+        if fn_name == "COUNT":
+            return len(_collect_args(True))
+        if fn_name == "COUNTA":
+            return len(_collect_args(False))
+        if fn_name == "ROUND" and len(args) == 2:
+            v = _to_number(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting))
+            nd = int(_to_number(_eval_formula_expr(args[1], cur_sheet, wb_data, wb_raw, memo, visiting)))
+            return round(v, nd)
+        if fn_name == "ABS" and len(args) == 1:
+            return abs(_to_number(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting)))
+        if fn_name in ("CONCAT", "CONCATENATE"):
+            return "".join("" if x is None else str(x) for x in _collect_args(False))
+        if fn_name == "LEN" and len(args) == 1:
+            return len(str(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting) or ""))
+        if fn_name == "TRIM" and len(args) == 1:
+            return str(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting) or "").strip()
+        if fn_name == "LOWER" and len(args) == 1:
+            return str(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting) or "").lower()
+        if fn_name == "UPPER" and len(args) == 1:
+            return str(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting) or "").upper()
+        if fn_name == "AND":
+            return all(bool(_eval_formula_expr(a, cur_sheet, wb_data, wb_raw, memo, visiting)) for a in args)
+        if fn_name == "OR":
+            return any(bool(_eval_formula_expr(a, cur_sheet, wb_data, wb_raw, memo, visiting)) for a in args)
+        if fn_name == "NOT" and len(args) == 1:
+            return not bool(_eval_formula_expr(args[0], cur_sheet, wb_data, wb_raw, memo, visiting))
+        raise _FormulaFallback(fn_name)
+
+    # 7. Single Cell Reference (same-sheet or cross-sheet)
+    if re.match(r"^(?:(?:'[^']+'|[A-Za-z0-9_]+)!)?\$?[A-Z]{1,3}\$?\d+$", s):
+        vals = _expand_range_ref(s, cur_sheet, wb_data, wb_raw, memo, visiting)
+        val = vals[0] if vals else None
+        if isinstance(val, str) and val.startswith("="):
+            raise _FormulaFallback(val)
+        return 0 if val is None else val
+
+    raise _FormulaFallback(s)
+
+
+def _split_numfmt_sections(fmt: str) -> List[str]:
+    """Splits an Excel number_format string on unquoted semicolons."""
+    secs: List[str] = []
+    buf: List[str] = []
+    in_q = False
+    i = 0
+    while i < len(fmt):
+        ch = fmt[i]
+        if ch == "\\" and i + 1 < len(fmt):
+            buf.append(fmt[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            in_q = not in_q
+            buf.append(ch)
+        elif ch == ";" and not in_q:
+            secs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    secs.append("".join(buf))
+    return secs
+
+
+def _format_excel_value(val: Any, number_format: Optional[str]) -> str:
+    """Formats Python/Excel cell values cleanly according to Excel number formats and dates."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+
+    fmt = (number_format or "General").strip()
+
+    if isinstance(val, datetime.datetime):
+        has_time_fmt = bool(re.search(r"(?:h|s|am/pm|:mm|mm:)", fmt, re.I))
+        if has_time_fmt and (val.hour or val.minute or val.second):
+            return val.strftime("%Y-%m-%d %H:%M")
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, datetime.date):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, datetime.time):
+        return val.strftime("%H:%M:%S")
+    if isinstance(val, str):
+        return val
+
+    if not isinstance(val, (int, float)):
+        return str(val)
+
+    # Excel serial date check (date format tokens without numeric '#'/'0' placeholders)
+    fmt_clean_tags = re.sub(r'"[^"]*"|\[[^\]]*\]', "", fmt)
+    if re.search(r"[yd]", fmt_clean_tags, re.I) and not re.search(r"[0#]", fmt_clean_tags):
+        try:
+            dt_val = xl_from_excel(float(val))
+            if isinstance(dt_val, (datetime.datetime, datetime.date)):
+                return dt_val.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    if fmt in ("", "General", "@"):
+        if isinstance(val, int):
+            return str(val)
+        if float(val).is_integer() and abs(val) < 1e12:
+            return str(int(val))
+        return str(val)
+
+    sections = _split_numfmt_sections(fmt)
+    is_neg = val < 0
+    if is_neg and len(sections) > 1:
+        sec = sections[1]
+        explicit_neg_section = True
+    elif val == 0 and len(sections) > 2:
+        sec = sections[2]
+        explicit_neg_section = False
+    else:
+        sec = sections[0]
+        explicit_neg_section = False
+
+    # Extract currency/literal tokens before stripping format tags
+    sec_work = sec
+    # Replace [$₹-4009] or [$€-2] with literal symbol
+    sec_work = re.sub(r"\[\$([^-\]]+)(?:-[^\]]*)?\]", r"\1", sec_work)
+    # Strip remaining bracket tags like [Red], [h], etc. and alignment skips _X / *X
+    sec_work = re.sub(r"\[[^\]]*\]", "", sec_work)
+    sec_work = re.sub(r"_.|\*.", "", sec_work)
+    sec_work = sec_work.replace("\\", "").replace('"', "")
+
+    has_parens = "(" in sec_work and ")" in sec_work
+    is_pct = "%" in sec_work
+
+    num_match = re.search(r"[#0,.]+", sec_work)
+    if not num_match:
+        return str(val)
+
+    prefix_raw = sec_work[:num_match.start()]
+    num_pat = num_match.group(0)
+    suffix_raw = sec_work[num_match.end():]
+
+    # Clean leading '-' or '()' from prefix/suffix so we apply sign consistently
+    prefix = prefix_raw.replace("(", "").replace(")", "").replace("-", "").strip()
+    suffix = suffix_raw.replace("(", "").replace(")", "").replace("-", "").strip()
+
+    mag = abs(float(val)) * (100.0 if is_pct else 1.0)
+    dec_places = 0
+    if "." in num_pat:
+        dec_part = num_pat.split(".", 1)[1]
+        dec_places = sum(1 for ch in dec_part if ch in ("0", "#"))
+
+    try:
+        q_exp = Decimal("1") if dec_places == 0 else Decimal("1." + "0" * dec_places)
+        d_mag = Decimal(str(mag)).quantize(q_exp, rounding=ROUND_HALF_UP)
+        num_str = f"{d_mag:,f}" if "," in num_pat else f"{d_mag:f}"
+    except (InvalidOperation, ValueError):
+        num_str = f"{mag:,.{dec_places}f}" if "," in num_pat else f"{mag:.{dec_places}f}"
+
+    core = f"{prefix}{num_str}{suffix}"
+    if is_neg:
+        if has_parens or (explicit_neg_section and "(" in sec_work):
+            return f"({core})"
+        return f"-{core}"
+    return core
+
+
+def _extract_xlsx_workbook_model(xlsx_bytes: bytes) -> List[Dict[str, Any]]:
+    """
+    Extracts every sheet of an XLSX workbook into a normalized, trimmed, styled model:
+    - Evaluates uncached formulas (with cycle/fallback protection) and formats numbers/dates cleanly
+    - Trims leading empty rows/columns (e.g. C4 offset tables) while marking completely blank sheets
+    - Maps Excel merged ranges into trimmed grid (col0, row0, col1, row1) spans
+    - Extracts background fills, high-contrast font colors, alignment, wrap, hyperlinks & flattened images
+    """
     wb_data = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
     wb_raw = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=False)
+    eval_memo: Dict[Tuple[str, int, int], Any] = {}
+    visiting: Set[Tuple[str, int, int]] = set()
+    sheets_out: List[Dict[str, Any]] = []
+
+    try:
+        for ws_raw in wb_raw.worksheets:
+            title = ws_raw.title
+            ws_data = wb_data[title]
+
+            # Extract and alpha-flatten anchored images
+            images_info: List[Dict[str, Any]] = []
+            for img_obj in getattr(ws_raw, "_images", []):
+                try:
+                    raw_img_bytes = img_obj._data()
+                    flat_bytes, iw, ih = _flatten_image_for_reportlab(raw_img_bytes)
+                    disp_w = float(getattr(img_obj, "width", 0) or iw)
+                    disp_h = float(getattr(img_obj, "height", 0) or ih)
+                    if disp_w <= 0:
+                        disp_w = float(iw)
+                    if disp_h <= 0:
+                        disp_h = float(ih)
+                    anchor = getattr(img_obj, "anchor", None)
+                    anc_row = getattr(getattr(anchor, "_from", None), "row", 0) if anchor else 0
+                    images_info.append({
+                        "bytes": flat_bytes,
+                        "iw": iw,
+                        "ih": ih,
+                        "disp_w_pt": disp_w * 0.75,
+                        "disp_h_pt": disp_h * 0.75,
+                        "anchor_row": int(anc_row or 0),
+                    })
+                except Exception as img_err:
+                    logger.warning(f"XLSX image extraction failed on '{title}': {img_err}")
+
+            # Scan only populated cells (O(populated), safe against 1M-row blank formatting!)
+            non_empty_coords: List[Tuple[int, int]] = []
+            for (r_c, c_c), cell_raw in ws_raw._cells.items():
+                c_data = ws_data._cells.get((r_c, c_c))
+                has_val = (c_data is not None and c_data.value is not None and str(c_data.value) != "") or (
+                    cell_raw.value is not None and str(cell_raw.value) != ""
+                )
+                has_hl = cell_raw.hyperlink is not None and bool(getattr(cell_raw.hyperlink, "target", None))
+                if has_val or has_hl:
+                    non_empty_coords.append((r_c, c_c))
+
+            if not non_empty_coords:
+                sheets_out.append({
+                    "title": title,
+                    "is_empty": True,
+                    "rows": [],
+                    "span_cmds": [],
+                    "repeat_hdr_rows": 0,
+                    "banner_rows": 0,
+                    "col_width_hints": [],
+                    "images": images_info,
+                })
+                continue
+
+            min_r = min(r for r, _ in non_empty_coords)
+            max_r = max(r for r, _ in non_empty_coords)
+            min_c = min(c for _, c in non_empty_coords)
+            max_c = max(c for _, c in non_empty_coords)
+
+            # Expand bounding box if any merged range containing a populated top-left extends further
+            coord_set = set(non_empty_coords)
+            active_merges = []
+            for mr in ws_raw.merged_cells.ranges:
+                if (mr.min_row, mr.min_col) in coord_set or any(
+                    min_r <= rr <= max_r and min_c <= cc <= max_c
+                    for rr in range(mr.min_row, mr.max_row + 1)
+                    for cc in range(mr.min_col, mr.max_col + 1)
+                ):
+                    min_r = min(min_r, mr.min_row)
+                    max_r = max(max_r, mr.max_row)
+                    min_c = min(min_c, mr.min_col)
+                    max_c = max(max_c, mr.max_col)
+                    active_merges.append(mr)
+
+            n_rows = max_r - min_r + 1
+            n_cols = max_c - min_c + 1
+
+            # Map merged ranges into trimmed 0-indexed coordinates
+            span_cmds: List[Tuple[int, int, int, int]] = []
+            merged_child_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
+            for mr in active_merges:
+                r0 = mr.min_row - min_r
+                c0 = mr.min_col - min_c
+                r1 = mr.max_row - min_r
+                c1 = mr.max_col - min_c
+                if c1 > c0 or r1 > r0:
+                    span_cmds.append((c0, r0, c1, r1))
+                for rr in range(r0, r1 + 1):
+                    for cc in range(c0, c1 + 1):
+                        if rr != r0 or cc != c0:
+                            merged_child_map[(rr, cc)] = (r0, c0)
+
+            col_hints: List[float] = []
+            for abs_c in range(min_c, max_c + 1):
+                cd = ws_raw.column_dimensions.get(get_column_letter(abs_c))
+                col_hints.append(float(cd.width) if (cd and cd.width) else 12.0)
+
+            grid: List[List[Dict[str, Any]]] = []
+            for r_off in range(n_rows):
+                abs_r = min_r + r_off
+                row_list: List[Dict[str, Any]] = []
+                for c_off in range(n_cols):
+                    abs_c = min_c + c_off
+                    c_raw = ws_raw.cell(row=abs_r, column=abs_c)
+                    is_origin = (r_off, c_off) not in merged_child_map
+
+                    if not is_origin:
+                        orig_r, orig_c = merged_child_map[(r_off, c_off)]
+                        fill_hex = _extract_xlsx_color_hex(
+                            c_raw.fill.fgColor if c_raw.fill and c_raw.fill.fill_type == "solid" else None,
+                            is_fill=True,
+                        )
+                        row_list.append({
+                            "text": "",
+                            "is_origin": False,
+                            "origin": (orig_r, orig_c),
+                            "fill": fill_hex,
+                            "color": None,
+                            "bold": False,
+                            "italic": False,
+                            "align": "left",
+                            "wrap": False,
+                            "url": None,
+                        })
+                        continue
+
+                    val = _resolve_xlsx_cell_value(title, abs_r, abs_c, wb_data, wb_raw, eval_memo, visiting)
+                    fmt = c_raw.number_format
+                    text_str = _format_excel_value(val, fmt)
+
+                    hl_url: Optional[str] = None
+                    if c_raw.hyperlink and getattr(c_raw.hyperlink, "target", None):
+                        hl_url = str(c_raw.hyperlink.target).strip()
+                        if not text_str and getattr(c_raw.hyperlink, "display", None):
+                            text_str = str(c_raw.hyperlink.display)
+                        elif not text_str:
+                            text_str = hl_url
+
+                    fill_hex = None
+                    if c_raw.fill and c_raw.fill.fill_type == "solid":
+                        fill_hex = _extract_xlsx_color_hex(c_raw.fill.fgColor or c_raw.fill.start_color, is_fill=True)
+
+                    font_obj = c_raw.font
+                    is_bold = bool(font_obj and font_obj.bold)
+                    is_italic = bool(font_obj and font_obj.italic)
+                    font_hex = _extract_xlsx_color_hex(font_obj.color, is_fill=False) if font_obj else None
+
+                    dark_bg = _is_dark_hex(fill_hex)
+                    if dark_bg and font_hex in (None, "000000", "0F172A", "1E293B", "334155"):
+                        font_hex = "FFFFFF"
+                    elif not dark_bg and fill_hex is None and font_hex == "FFFFFF":
+                        font_hex = "0F172A"
+
+                    al = c_raw.alignment
+                    h_align = (al.horizontal if al and al.horizontal else "") or ""
+                    if h_align not in ("left", "center", "right"):
+                        h_align = "right" if isinstance(val, (int, float)) and not isinstance(val, bool) else "left"
+                    is_wrap = bool(al and al.wrap_text) or ("\n" in text_str)
+
+                    row_list.append({
+                        "text": text_str,
+                        "is_origin": True,
+                        "origin": (r_off, c_off),
+                        "fill": fill_hex,
+                        "color": font_hex,
+                        "bold": is_bold,
+                        "italic": is_italic,
+                        "align": h_align,
+                        "wrap": is_wrap,
+                        "url": hl_url,
+                    })
+                grid.append(row_list)
+
+            # Detect full-width banner rows at top & safe repeating header row count
+            banner_rows = 0
+            for r_chk in range(min(2, n_rows)):
+                if any(c0 == 0 and r0 == r_chk and c1 >= max(n_cols - 2, 1) and r1 == r_chk for c0, r0, c1, r1 in span_cmds):
+                    banner_rows += 1
+                else:
+                    break
+
+            repeat_hdr_rows = 0
+            if n_rows > 1:
+                # Start after top banners if table has data below; include contiguous bold/shaded header rows
+                start_hdr = banner_rows if banner_rows < n_rows - 1 else 0
+                hdr_end = start_hdr
+                while hdr_end < min(n_rows - 1, start_hdr + 3):
+                    row_cells = grid[hdr_end]
+                    orig_cells = [c for c in row_cells if c["is_origin"] and c["text"].strip()]
+                    if orig_cells and (
+                        all(c["bold"] or c["fill"] is not None for c in orig_cells) or hdr_end == start_hdr
+                    ):
+                        hdr_end += 1
+                        if hdr_end == start_hdr + 1 and not any(
+                            r0 < hdr_end <= r1 for _, r0, _, r1 in span_cmds
+                        ):
+                            break
+                    else:
+                        break
+                repeat_hdr_rows = hdr_end
+                # Never allow repeatRows to split across a vertical merge
+                for _, r0, _, r1 in span_cmds:
+                    if r0 < repeat_hdr_rows <= r1:
+                        repeat_hdr_rows = r1 + 1
+                if repeat_hdr_rows >= n_rows:
+                    repeat_hdr_rows = 1 if not any(r0 == 0 and r1 > 0 for _, r0, _, r1 in span_cmds) else 0
+
+            sheets_out.append({
+                "title": title,
+                "is_empty": False,
+                "rows": grid,
+                "span_cmds": span_cmds,
+                "repeat_hdr_rows": repeat_hdr_rows,
+                "banner_rows": banner_rows,
+                "col_width_hints": col_hints,
+                "images": images_info,
+            })
+    finally:
+        wb_data.close()
+        wb_raw.close()
+        eval_memo.clear()
+        gc.collect()
+
+    return sheets_out
+
+
+def _compute_xlsx_col_widths(
+    sheet: Dict[str, Any],
+    avail_width: float,
+    sans_family: Optional[str] = None,
+    bold_family: Optional[str] = None,
+) -> Tuple[List[float], float]:
+    """Computes exact-glyph-aware proportional column widths within avail_width so header/cell words don't mid-wrap."""
+    reg_sans, _ = _ensure_reportlab_unicode_fonts()
+    if sans_family is None:
+        sans_family = reg_sans
+    if bold_family is None:
+        bold_family = f"{reg_sans}-Bold" if reg_sans == "VelmoSans" else "Helvetica-Bold"
+    try:
+        font_sans_obj = pdfmetrics.getFont(sans_family)
+        font_bold_obj = pdfmetrics.getFont(bold_family)
+    except Exception:
+        font_sans_obj = font_bold_obj = None
+
+    rows = sheet["rows"]
+    num_cols = len(rows[0]) if rows else 0
+    if num_cols == 0:
+        return [], 8.5
+
+    if num_cols >= 11:
+        font_pt, pad_pt = 6.0, 6.0
+    elif num_cols >= 9:
+        font_pt, pad_pt = 6.8, 7.0
+    elif num_cols >= 7:
+        font_pt, pad_pt = 7.4, 8.0
+    else:
+        font_pt, pad_pt = 8.4, 9.0
+
+    def _measure_min_pref(f_pt: float) -> Tuple[List[float], List[float]]:
+        mn = [24.0] * num_cols
+        pf = [34.0] * num_cols
+        hints = sheet.get("col_width_hints", [])
+        for r_idx, r in enumerate(rows):
+            for c_i, cell in enumerate(r):
+                if not cell["is_origin"]:
+                    continue
+                if any(c0 == c_i and r0 == r_idx and c1 > c0 for c0, r0, c1, _ in sheet["span_cmds"]):
+                    continue
+                txt = cell["text"].strip()
+                if not txt:
+                    continue
+                f_obj = font_bold_obj if cell["bold"] else font_sans_obj
+                words = [w for w in re.split(r"\s+", txt) if w]
+                # Measure exact longest unbreakable token (up to 18 chars so pathological tokens don't crush neighbors)
+                max_w_pt = 0.0
+                for w in words:
+                    sample_w = w[:18]
+                    if f_obj is not None:
+                        w_pt = f_obj.stringWidth(sample_w, f_pt)
+                    else:
+                        w_pt = len(sample_w) * f_pt * 0.64
+                    if w_pt > max_w_pt:
+                        max_w_pt = w_pt
+                mn[c_i] = max(mn[c_i], max_w_pt + pad_pt)
+
+                longest_ln = max(txt.splitlines(), key=len, default="")[:34]
+                if f_obj is not None:
+                    ln_pt = f_obj.stringWidth(longest_ln, f_pt)
+                else:
+                    ln_pt = len(longest_ln) * f_pt * 0.58
+                pf[c_i] = max(pf[c_i], ln_pt + pad_pt + 2.0)
+
+        if len(hints) == num_cols and sum(hints) > 0:
+            h_scale = avail_width / sum(hints)
+            for c_i in range(num_cols):
+                pf[c_i] = max(mn[c_i], 0.70 * pf[c_i] + 0.30 * (hints[c_i] * h_scale))
+        return mn, pf
+
+    min_w, pref_w = _measure_min_pref(font_pt)
+    while sum(min_w) > avail_width and font_pt > 5.4:
+        font_pt = round(font_pt - 0.3, 1)
+        min_w, pref_w = _measure_min_pref(font_pt)
+
+    sum_min = sum(min_w)
+    if sum_min >= avail_width:
+        ratio = avail_width / max(sum_min, 1.0)
+        widths = [w * ratio for w in min_w]
+    else:
+        extra = avail_width - sum_min
+        deltas = [max(pref_w[i] - min_w[i], 0.5) for i in range(num_cols)]
+        sum_delta = sum(deltas)
+        widths = [min_w[i] + extra * (deltas[i] / sum_delta) for i in range(num_cols)]
+
+    return widths, font_pt
+
+
+# --- Word & Excel Core Converters ---
+
+def _add_docx_hyperlink(paragraph, url: str, text: str, font_pt: float, hex_color: str = "2563EB", bold: bool = False):
+    """Appends a real clickable Word <w:hyperlink> element to a python-docx paragraph."""
+    r_id = paragraph.part.relate_to(url, DOCX_RT.HYPERLINK, is_external=True)
+    sz_half_pt = int(round(font_pt * 2))
+    b_tag = "<w:b/>" if bold else ""
+    safe_txt = html.escape(text, quote=False)
+    hl_xml = (
+        f'<w:hyperlink {nsdecls("w", "r")} r:id="{r_id}">'
+        f'<w:r><w:rPr>{b_tag}<w:color w:val="{hex_color}"/><w:u w:val="single"/>'
+        f'<w:sz w:val="{sz_half_pt}"/><w:szCs w:val="{sz_half_pt}"/></w:rPr>'
+        f'<w:t xml:space="preserve">{safe_txt}</w:t></w:r></w:hyperlink>'
+    )
+    paragraph._p.append(parse_xml(hl_xml))
+
+
+def _set_docx_cell_width_and_margins(cell, width_pt: float, v_pad_tw: int = 45, h_pad_tw: int = 70):
+    """Sets explicit Word cell width (dxa) and compact cell margins in O(1)."""
+    tcPr = cell._tc.get_or_add_tcPr()
+    for child in list(tcPr):
+        if child.tag.endswith(("tcW", "tcMar")):
+            tcPr.remove(child)
+    twips = max(int(round(width_pt * 20.0)), 180)
+    tcPr.append(parse_xml(f'<w:tcW {nsdecls("w")} w:w="{twips}" w:type="dxa"/>'))
+    tcPr.append(parse_xml(
+        f'<w:tcMar {nsdecls("w")}>'
+        f'<w:top w:w="{v_pad_tw}" w:type="dxa"/>'
+        f'<w:bottom w:w="{v_pad_tw}" w:type="dxa"/>'
+        f'<w:left w:w="{h_pad_tw}" w:type="dxa"/>'
+        f'<w:right w:w="{h_pad_tw}" w:type="dxa"/>'
+        f'</w:tcMar>'
+    ))
+
+
+def xlsx_to_docx(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+    sheets = _extract_xlsx_workbook_model(xlsx_bytes)
     doc = Document()
+    sheet_count = len(sheets)
 
-    max_cols_overall = 0
-    for ws in wb_data.worksheets:
-        for row in ws.iter_rows(values_only=False):
-            non_empty_indices = [idx for idx, cell in enumerate(row) if cell.value is not None and str(cell.value).strip() != ""]
-            if non_empty_indices:
-                max_cols_overall = max(max_cols_overall, max(non_empty_indices) + 1)
+    def _configure_section(sec, use_landscape: bool) -> float:
+        if use_landscape:
+            sec.orientation = WD_ORIENTATION.LANDSCAPE
+            if sec.page_width < sec.page_height:
+                sec.page_width, sec.page_height = sec.page_height, sec.page_width
+            sec.left_margin = DocxInches(0.45)
+            sec.right_margin = DocxInches(0.45)
+        else:
+            sec.orientation = WD_ORIENTATION.PORTRAIT
+            if sec.page_width > sec.page_height:
+                sec.page_width, sec.page_height = sec.page_height, sec.page_width
+            sec.left_margin = DocxInches(0.55)
+            sec.right_margin = DocxInches(0.55)
+        sec.top_margin = DocxInches(0.50)
+        sec.bottom_margin = DocxInches(0.50)
+        return float(sec.page_width.pt - sec.left_margin.pt - sec.right_margin.pt)
 
-    if max_cols_overall > 6:
-        section = doc.sections[0]
-        section.orientation = WD_ORIENTATION.LANDSCAPE
-        if section.page_width < section.page_height:
-            section.page_width, section.page_height = section.page_height, section.page_width
+    align_map = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT,
+        "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    }
+    prev_landscape: Optional[bool] = None
 
-    for ws_data in wb_data.worksheets:
-        ws_raw = wb_raw[ws_data.title]
-        doc.add_heading(ws_data.title, level=1)
+    for s_idx, sh in enumerate(sheets):
+        n_cols = len(sh["rows"][0]) if sh["rows"] else 1
+        est_hint_pt = sum(sh.get("col_width_hints", [])) * 5.2
+        use_landscape = n_cols >= 7 or est_hint_pt > 530.0
 
-        rows_data = []
-        max_col_in_sheet = 0
+        if s_idx == 0:
+            avail_w_pt = _configure_section(doc.sections[0], use_landscape)
+        elif use_landscape != prev_landscape:
+            new_sec = doc.add_section(WD_SECTION.NEW_PAGE)
+            avail_w_pt = _configure_section(new_sec, use_landscape)
+        else:
+            doc.add_page_break()
+            avail_w_pt = _configure_section(doc.sections[-1], use_landscape)
+        prev_landscape = use_landscape
 
-        for row in ws_data.iter_rows(values_only=False):
-            row_cells = []
-            row_has_value = False
-            for cell in row:
-                val = cell.value
-                raw_cell = ws_raw.cell(row=cell.row, column=cell.column)
-                if val is None and raw_cell.value is not None:
-                    val = raw_cell.value
-                if val is not None and str(val).strip() != "":
-                    row_has_value = True
-                row_cells.append((cell, raw_cell, val))
+        h_para = doc.add_heading(sh["title"], level=1)
+        h_para.paragraph_format.space_after = DocxPt(6)
 
-            if row_has_value:
-                last_idx = max(i for i, (_, _, v) in enumerate(row_cells) if v is not None and str(v).strip() != "")
-                max_col_in_sheet = max(max_col_in_sheet, last_idx + 1)
-                rows_data.append(row_cells)
-
-        if not rows_data or max_col_in_sheet == 0:
-            doc.add_paragraph("(Empty sheet)")
+        if sh["is_empty"] and not sh["images"]:
+            p_emp = doc.add_paragraph("(Empty worksheet — no data)")
+            if p_emp.runs:
+                p_emp.runs[0].italic = True
             continue
 
-        num_rows = len(rows_data)
-        num_cols = max_col_in_sheet
-        table = doc.add_table(rows=num_rows, cols=num_cols)
-        table.style = 'Table Grid'
+        if not sh["is_empty"] and sh["rows"]:
+            num_rows = len(sh["rows"])
+            num_cols = len(sh["rows"][0])
+            col_widths_pt, base_font_pt = _compute_xlsx_col_widths(sh, avail_w_pt)
+            docx_font_pt = max(base_font_pt + 1.1, 7.5 if num_cols >= 11 else 8.5)
 
-        for r_i, row_cells in enumerate(rows_data):
-            for c_i in range(num_cols):
-                table_cell = table.cell(r_i, c_i)
-                cell_data, raw_cell, val = row_cells[c_i] if c_i < len(row_cells) else (None, None, None)
-                val_str = "" if val is None else str(val)
-                p = table_cell.paragraphs[0]
-                run = p.add_run(val_str)
+            table = doc.add_table(rows=num_rows, cols=num_cols)
+            table.style = "Table Grid"
+            table.autofit = False
 
-                if cell_data and cell_data.font and cell_data.font.bold:
-                    run.bold = True
-                if cell_data:
-                    fill_hex = extract_fill_hex(cell_data)
-                    if fill_hex:
-                        set_cell_background(table_cell, fill_hex)
+            # Set tblGrid widths once
+            ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            tblGrid = table._tbl.find(f"{ns_w}tblGrid")
+            if tblGrid is not None:
+                for g_col, w_pt in zip(tblGrid.findall(f"{ns_w}gridCol"), col_widths_pt):
+                    g_col.set(f"{ns_w}w", str(max(int(round(w_pt * 20.0)), 180)))
 
-        doc.add_paragraph()
+            # Cache row.cells once per row so cell lookup is strictly O(1)
+            row_cells_grid = [list(row.cells) for row in table.rows]
+            v_pad_tw = 35 if num_rows > 40 else 50
+            h_pad_tw = 45 if num_cols >= 10 else 75
+
+            for r_i, row_data in enumerate(sh["rows"]):
+                trPr = table.rows[r_i]._tr.get_or_add_trPr()
+                trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+                if r_i < sh["repeat_hdr_rows"] and num_rows > sh["repeat_hdr_rows"]:
+                    trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
+
+                row_cells = row_cells_grid[r_i]
+                for c_i in range(num_cols):
+                    cell_info = row_data[c_i]
+                    t_cell = row_cells[c_i]
+                    _set_docx_cell_width_and_margins(t_cell, col_widths_pt[c_i], v_pad_tw=v_pad_tw, h_pad_tw=h_pad_tw)
+                    t_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+                    if not cell_info["is_origin"]:
+                        continue
+
+                    fill_hex = cell_info["fill"] or ("F8FAFC" if r_i % 2 == 1 else "FFFFFF")
+                    set_cell_background(t_cell, fill_hex)
+                    dark_bg = _is_dark_hex(fill_hex)
+                    fg_hex = cell_info["color"] or ("FFFFFF" if dark_bg else "0F172A")
+
+                    p = t_cell.paragraphs[0]
+                    p.alignment = align_map.get(cell_info["align"], WD_ALIGN_PARAGRAPH.LEFT)
+                    p.paragraph_format.space_before = DocxPt(0)
+                    p.paragraph_format.space_after = DocxPt(0)
+
+                    txt_val = cell_info["text"]
+                    if cell_info["url"]:
+                        link_hex = "93C5FD" if dark_bg else "2563EB"
+                        _add_docx_hyperlink(p, cell_info["url"], txt_val, docx_font_pt, hex_color=link_hex, bold=cell_info["bold"])
+                    elif txt_val != "":
+                        run = p.add_run(txt_val)
+                        run.font.size = DocxPt(docx_font_pt)
+                        run.bold = cell_info["bold"]
+                        run.italic = cell_info["italic"]
+                        run.font.color.rgb = DocxRGBColor.from_string(fg_hex)
+
+            # Apply Excel merged cell spans (gridSpan + vMerge) after populating contents
+            for c0, r0, c1, r1 in sh["span_cmds"]:
+                try:
+                    row_cells_grid[r0][c0].merge(row_cells_grid[r1][c1])
+                except Exception:
+                    pass
+
+        if sh["images"]:
+            for im_info in sh["images"]:
+                try:
+                    target_w_in = im_info["disp_w_pt"] / 72.0
+                    target_h_in = im_info["disp_h_pt"] / 72.0
+                    max_w_in = (avail_w_pt / 72.0) - 0.1
+                    max_h_in = 5.2 if use_landscape else 6.0
+                    scale = min(max_w_in / max(target_w_in, 0.1), max_h_in / max(target_h_in, 0.1), 1.0)
+                    p_img = doc.add_paragraph()
+                    p_img.paragraph_format.space_before = DocxPt(6)
+                    p_img.paragraph_format.space_after = DocxPt(4)
+                    p_img.add_run().add_picture(io.BytesIO(im_info["bytes"]), width=DocxInches(target_w_in * scale))
+                except Exception as img_err:
+                    logger.warning(f"Failed adding XLSX image to DOCX on '{sh['title']}': {img_err}")
 
     out_io = io.BytesIO()
-    doc.save(out_io)
-    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", len(wb_data.worksheets)
+    try:
+        doc.save(out_io)
+        return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", sheet_count
+    finally:
+        sheets.clear()
+        gc.collect()
 
 
 def _reset_style_list_counters(list_counters: Dict[Tuple[str, int], int]) -> None:
@@ -2308,60 +3314,188 @@ def xlsx_to_pdf(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int
 
 
 def _xlsx_to_pdf_reportlab(xlsx_bytes: bytes) -> bytes:
-    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    sans_family, _ = _ensure_reportlab_unicode_fonts()
+    bold_family = f"{sans_family}-Bold" if sans_family == "VelmoSans" else "Helvetica-Bold"
+    italic_family = f"{sans_family}-Italic" if sans_family == "VelmoSans" else "Helvetica-Oblique"
+
+    sheets = _extract_xlsx_workbook_model(xlsx_bytes)
     buffer = io.BytesIO()
 
-    max_cols = 0
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            non_empty = [idx for idx, val in enumerate(row) if val is not None and str(val).strip() != ""]
-            if non_empty:
-                max_cols = max(max_cols, max(non_empty) + 1)
+    # Build per-sheet Portrait/Landscape geometry
+    page_templates: List[PageTemplate] = []
+    sheet_geoms: List[dict] = []
 
-    pagesize = landscape(letter) if max_cols > 6 else letter
-    pdf_doc = SimpleDocTemplate(buffer, pagesize=pagesize, leftMargin=30, rightMargin=30, topMargin=30, bottomMargin=30)
+    for s_idx, sh in enumerate(sheets):
+        n_cols = len(sh["rows"][0]) if sh["rows"] else 1
+        est_hint_pt = sum(sh.get("col_width_hints", [])) * 5.2
+        use_landscape = n_cols >= 7 or est_hint_pt > 530.0
+        pw, ph = landscape(letter) if use_landscape else letter
+        lm = rm = 24.0 if use_landscape else 28.0
+        tm = bm = 34.0
+        avail_w = pw - lm - rm
+        avail_h = ph - tm - bm
+        geom = {"pw": pw, "ph": ph, "lm": lm, "rm": rm, "tm": tm, "bm": bm, "avail_w": avail_w, "avail_h": avail_h, "title": sh["title"]}
+        sheet_geoms.append(geom)
+
+        def _make_on_page(g: dict):
+            def _on_page(canvas_obj, doc_obj):
+                canvas_obj.saveState()
+                canvas_obj.setFont(sans_family, 7.5)
+                canvas_obj.setFillColor(colors.HexColor("#64748B"))
+                canvas_obj.drawString(g["lm"], g["ph"] - 20.0, f"Sheet: {g['title']}"[:90])
+                canvas_obj.setStrokeColor(colors.HexColor("#E2E8F0"))
+                canvas_obj.setLineWidth(0.5)
+                canvas_obj.line(g["lm"], g["ph"] - 24.0, g["pw"] - g["rm"], g["ph"] - 24.0)
+                canvas_obj.restoreState()
+
+                def _deferred_footer(c_obj, p_no: int, tot_p: int):
+                    c_obj.saveState()
+                    c_obj.setStrokeColor(colors.HexColor("#E2E8F0"))
+                    c_obj.setLineWidth(0.5)
+                    c_obj.line(g["lm"], 24.0, g["pw"] - g["rm"], 24.0)
+                    c_obj.setFont(sans_family, 7.5)
+                    c_obj.setFillColor(colors.HexColor("#64748B"))
+                    c_obj.drawString(g["lm"], 13.0, f"Page {p_no} of {tot_p}")
+                    c_obj.restoreState()
+
+                canvas_obj._velmo_footer_cb = _deferred_footer
+            return _on_page
+
+        frame = Frame(lm, bm, avail_w, avail_h, id=f"xlsx_frame_{s_idx}", leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
+        page_templates.append(PageTemplate(id=f"xlsx_sec_{s_idx}", frames=[frame], pagesize=(pw, ph), onPage=_make_on_page(geom)))
+
+    if not page_templates:
+        pw, ph = letter
+        frame = Frame(28, 34, pw - 56, ph - 68, id="xlsx_empty")
+        page_templates.append(PageTemplate(id="xlsx_sec_0", frames=[frame], pagesize=(pw, ph)))
+        sheet_geoms.append({"pw": pw, "ph": ph, "lm": 28.0, "rm": 28.0, "tm": 34.0, "bm": 34.0, "avail_w": pw - 56, "avail_h": ph - 68, "title": "Workbook"})
+
+    pdf_doc = BaseDocTemplate(
+        buffer,
+        pagesize=(sheet_geoms[0]["pw"], sheet_geoms[0]["ph"]),
+        leftMargin=sheet_geoms[0]["lm"],
+        rightMargin=sheet_geoms[0]["rm"],
+        topMargin=sheet_geoms[0]["tm"],
+        bottomMargin=sheet_geoms[0]["bm"],
+        pageTemplates=page_templates,
+    )
 
     styles = getSampleStyleSheet()
-    h1_style = ParagraphStyle('XlsxH1', parent=styles['Heading1'], fontSize=15, leading=18, spaceAfter=8, textColor=colors.HexColor('#0F172A'))
-    cell_style = ParagraphStyle('XlsxCell', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.HexColor('#0F172A'))
-    header_style = ParagraphStyle('XlsxHdr', parent=styles['Normal'], fontSize=8, leading=10, fontName='Helvetica-Bold', textColor=colors.HexColor('#0F172A'))
+    h1_style = ParagraphStyle(
+        "XlsxH1", parent=styles["Heading1"], fontName=bold_family,
+        fontSize=13.5, leading=17, spaceAfter=6, textColor=colors.HexColor("#0F172A"), keepWithNext=True,
+    )
+    empty_style = ParagraphStyle(
+        "XlsxEmpty", parent=styles["Normal"], fontName=italic_family,
+        fontSize=9, leading=12, textColor=colors.HexColor("#64748B"),
+    )
 
     story = []
-    for s_idx, ws in enumerate(wb.worksheets):
+    keepalive_bufs: List[io.BytesIO] = []
+    align_map = {"left": TA_LEFT, "center": TA_CENTER, "right": TA_RIGHT}
+
+    for s_idx, sh in enumerate(sheets):
+        geom = sheet_geoms[s_idx]
         if s_idx > 0:
+            story.append(NextPageTemplate(f"xlsx_sec_{s_idx}"))
             story.append(PageBreak())
 
-        story.append(RLParagraph(html.escape(ws.title), h1_style))
-        table_data = []
-        for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
-            if any(v is not None and str(v).strip() != "" for v in row):
-                last_idx = max(i for i, v in enumerate(row) if v is not None and str(v).strip() != "")
-                row_slice = row[:last_idx + 1]
-                r_data = [RLParagraph(html.escape("" if val is None else str(val)), header_style if r_idx == 0 else cell_style) for val in row_slice]
-                table_data.append(r_data)
+        story.append(RLParagraph(html.escape(sh["title"]), h1_style))
 
-        if table_data:
-            rl_table = RLTable(table_data)
-            rl_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
-                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                ('TOPPADDING', (0, 0), (-1, -1), 3),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-                ('LEFTPADDING', (0, 0), (-1, -1), 4),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-            ]))
+        if sh["is_empty"] and not sh["images"]:
+            story.append(RLParagraph("(Empty worksheet — no data)", empty_style))
+            continue
+
+        if not sh["is_empty"] and sh["rows"]:
+            col_widths, font_pt = _compute_xlsx_col_widths(sh, geom["avail_w"], sans_family=sans_family, bold_family=bold_family)
+            leading_pt = round(font_pt * 1.26, 1)
+            h_pad = 2.5 if len(col_widths) >= 10 else 3.8
+            v_pad = 2.5 if len(sh["rows"]) > 40 else 3.5
+
+            ts_cmds: List[Any] = [
+                ("GRID", (0, 0), (-1, -1), 0.45, colors.HexColor("#CBD5E1")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), v_pad),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), v_pad),
+                ("LEFTPADDING", (0, 0), (-1, -1), h_pad),
+                ("RIGHTPADDING", (0, 0), (-1, -1), h_pad),
+            ]
+
+            table_data = []
+            for r_idx, row in enumerate(sh["rows"]):
+                r_cells = []
+                for c_idx, cell in enumerate(row):
+                    if not cell["is_origin"]:
+                        r_cells.append("")
+                        continue
+
+                    fill_hex = cell["fill"] or ("F8FAFC" if r_idx % 2 == 1 else "FFFFFF")
+                    ts_cmds.append(("BACKGROUND", (c_idx, r_idx), (c_idx, r_idx), colors.HexColor(f"#{fill_hex}")))
+                    dark_bg = _is_dark_hex(fill_hex)
+                    fg_hex = cell["color"] or ("FFFFFF" if dark_bg else "0F172A")
+
+                    esc_txt = html.escape(cell["text"]).replace("\n", "<br/>")
+                    if cell["url"]:
+                        esc_url = html.escape(cell["url"], quote=True)
+                        link_hex = "93C5FD" if dark_bg else "2563EB"
+                        markup = f'<a href="{esc_url}" color="#{link_hex}"><u>{esc_txt}</u></a>'
+                    else:
+                        markup = esc_txt
+
+                    if cell["italic"]:
+                        fname = italic_family
+                    elif cell["bold"]:
+                        fname = bold_family
+                    else:
+                        fname = sans_family
+
+                    c_style = ParagraphStyle(
+                        "XlsxCellDyn",
+                        fontName=fname,
+                        fontSize=font_pt,
+                        leading=leading_pt,
+                        textColor=colors.HexColor(f"#{fg_hex}"),
+                        alignment=align_map.get(cell["align"], TA_LEFT),
+                    )
+                    r_cells.append(RLParagraph(markup, c_style))
+                table_data.append(r_cells)
+
+            for c0, r0, c1, r1 in sh["span_cmds"]:
+                ts_cmds.append(("SPAN", (c0, r0), (c1, r1)))
+
+            rep_rows = sh["repeat_hdr_rows"] if len(sh["rows"]) > max(sh["repeat_hdr_rows"], 1) else 0
+            rl_table = RLTable(table_data, colWidths=col_widths, repeatRows=rep_rows, splitByRow=1)
+            rl_table.setStyle(TableStyle(ts_cmds))
             story.append(rl_table)
-        else:
-            story.append(RLParagraph("(Empty sheet)", cell_style))
 
-        story.append(Spacer(1, 10))
+        if sh["images"]:
+            story.append(Spacer(1, 10))
+            for im_info in sh["images"]:
+                try:
+                    target_w = im_info["disp_w_pt"]
+                    target_h = im_info["disp_h_pt"]
+                    max_w = geom["avail_w"] - 4.0
+                    max_h = geom["avail_h"] * 0.52
+                    scale = min(max_w / max(target_w, 1.0), max_h / max(target_h, 1.0), 1.0)
+                    buf = io.BytesIO(im_info["bytes"])
+                    keepalive_bufs.append(buf)
+                    rl_img = RLImage(buf, width=target_w * scale, height=target_h * scale)
+                    rl_img.hAlign = "LEFT"
+                    story.append(rl_img)
+                    story.append(Spacer(1, 8))
+                except Exception as im_err:
+                    logger.warning(f"Failed adding XLSX image to PDF on '{sh['title']}': {im_err}")
 
     if not story:
-        story.append(RLParagraph("Empty Workbook", cell_style))
+        story.append(RLParagraph("Empty Workbook", empty_style))
 
-    pdf_doc.build(story)
-    return buffer.getvalue()
+    try:
+        pdf_doc.build(story, canvasmaker=_VelmoNumberedCanvas)
+        return buffer.getvalue()
+    finally:
+        keepalive_bufs.clear()
+        story.clear()
+        gc.collect()
 
 
 def docx_to_png(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
@@ -2708,17 +3842,27 @@ def _render_styled_pptx_table_slice(
     col_widths_in = [total_w_in * (w / sum_wt) for w in col_weights]
 
     row_heights_in: List[float] = []
-    for r in raw_rows_slice:
+    for r_i, r in enumerate(raw_rows_slice):
         max_lines = 1
         for c_i, cell in enumerate(r):
             if not cell or not cell["is_origin"]:
                 continue
-            txt = " ".join(p["plain_text"].strip() for p in cell["paras"] if p["plain_text"].strip())
-            cw_in = max(col_widths_in[c_i] - 0.12, 0.35)
+            # Skip wide horizontal merges when computing single-column wrapping height
+            is_h_merge = any(c0 == c_i and r0 == r_i and c1 > c0 for c0, r0, c1, _ in span_cmds_slice)
+            span_w_in = col_widths_in[c_i]
+            if is_h_merge:
+                for c0, r0, c1, _ in span_cmds_slice:
+                    if c0 == c_i and r0 == r_i:
+                        span_w_in = sum(col_widths_in[c0:c1 + 1])
+                        break
+            txt = "\n".join(p["plain_text"].strip() for p in cell["paras"] if p["plain_text"].strip())
+            cw_in = max(span_w_in - 0.10, 0.35)
             cpl = max(int(cw_in * 10.0 * (12.0 / font_pt)), 6)
-            lines_needed = max(1, (len(txt) + cpl - 1) // cpl)
+            lines_needed = 0
+            for ln in (txt.splitlines() or [""]):
+                lines_needed += max(1, (len(ln) + cpl - 1) // cpl)
             max_lines = max(max_lines, lines_needed)
-        rh = max(0.26, max_lines * ((font_pt * 1.35) / 72.0) + 0.10)
+        rh = max(0.24, max_lines * ((font_pt * 1.32) / 72.0) + 0.09)
         row_heights_in.append(rh)
 
     est_h = min(max_height, Inches(sum(row_heights_in)))
@@ -2729,7 +3873,7 @@ def _render_styled_pptx_table_slice(
         tbl.columns[c_i].width = Inches(cw_in)
     scale_h = min(1.0, (max_height / Inches(1)) / max(sum(row_heights_in), 0.1))
     for r_i, rh in enumerate(row_heights_in):
-        tbl.rows[r_i].height = Inches(max(0.22, rh * scale_h))
+        tbl.rows[r_i].height = Inches(max(0.21, rh * scale_h))
 
     for r_i, row in enumerate(raw_rows_slice):
         is_hdr = r_i < repeat_hdr_rows
@@ -2754,18 +3898,55 @@ def _render_styled_pptx_table_slice(
                 pptx_cell.text = ""
                 continue
 
-            txt = "\n".join(
-                p["plain_text"].strip() for p in cell_info["paras"] if p["plain_text"].strip()
-            ).strip()
-            pptx_cell.text = txt
-            is_bold = is_hdr or any(
-                s.get("bold") for p in cell_info["paras"] for s in p["segments"]
-            )
-            fg = RGBColor(255, 255, 255) if dark_bg else RGBColor(15, 23, 42)
-            for p in pptx_cell.text_frame.paragraphs:
-                p.font.size = Pt(font_pt)
-                p.font.bold = is_bold
-                p.font.color.rgb = fg
+            non_empty_paras = [p for p in cell_info["paras"] if p["plain_text"].strip()]
+            tf = pptx_cell.text_frame
+            tf.word_wrap = True
+            tf.paragraphs[0].text = ""
+
+            has_urls = any(s.get("url") for p in non_empty_paras for s in p.get("segments", []))
+            if not has_urls:
+                txt = "\n".join(p["plain_text"].strip() for p in non_empty_paras).strip()
+                pptx_cell.text = txt
+                is_bold = is_hdr or any(
+                    s.get("bold") for p in non_empty_paras for s in p.get("segments", [])
+                )
+                first_col = next(
+                    (s.get("color") for p in non_empty_paras for s in p.get("segments", []) if s.get("color")),
+                    None,
+                )
+                if dark_bg and first_col in (None, "000000", "0F172A", "1E293B", "334155"):
+                    fg = RGBColor(255, 255, 255)
+                elif first_col and re.match(r"^[0-9A-F]{6}$", first_col.upper()):
+                    hx = first_col.upper()
+                    fg = RGBColor(int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+                else:
+                    fg = RGBColor(255, 255, 255) if dark_bg else RGBColor(15, 23, 42)
+                for p in pptx_cell.text_frame.paragraphs:
+                    p.font.size = Pt(font_pt)
+                    p.font.bold = is_bold
+                    p.font.color.rgb = fg
+            else:
+                for p_idx, p_info in enumerate(non_empty_paras):
+                    p = tf.paragraphs[0] if p_idx == 0 else tf.add_paragraph()
+                    for seg in p_info.get("segments", []):
+                        if not seg.get("text"):
+                            continue
+                        run = p.add_run()
+                        run.text = seg["text"]
+                        run.font.size = Pt(font_pt)
+                        run.font.bold = bool(is_hdr or seg.get("bold"))
+                        run.font.italic = bool(seg.get("italic"))
+                        if seg.get("url"):
+                            run.hyperlink.address = seg["url"]
+                            run.font.underline = True
+                            run.font.color.rgb = RGBColor(147, 197, 253) if dark_bg else RGBColor(37, 99, 235)
+                        elif seg.get("color") and re.match(r"^[0-9A-F]{6}$", seg["color"].upper()) and not (
+                            dark_bg and seg["color"].upper() in ("000000", "0F172A", "1E293B", "334155")
+                        ):
+                            hx = seg["color"].upper()
+                            run.font.color.rgb = RGBColor(int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16))
+                        else:
+                            run.font.color.rgb = RGBColor(255, 255, 255) if dark_bg else RGBColor(15, 23, 42)
 
     for c0, r0, c1, r1 in span_cmds_slice:
         try:
@@ -3231,46 +4412,147 @@ def docx_to_pptx(docx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
 
 
 def xlsx_to_pptx(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Turns each Excel sheet into a widescreen presentation slide with an editable table."""
-    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
+    """Turns each Excel sheet into clean, paginated 16:9 presentation slides with styled tables, merges, links, and flattened images."""
+    sheets = _extract_xlsx_workbook_model(xlsx_bytes)
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
-    sheet_count = len(wb.worksheets)
+    slide_count = 0
 
-    for ws in wb.worksheets:
-        slide = prs.slides.add_slide(blank_layout)
-        t_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.7), Inches(1.0))
+    margin_x_in = 0.50
+    content_w_in = 12.33
+    top_body_in = 1.00
+    max_y_in = 7.12
+
+    def _new_sheet_slide(title_txt: str):
+        nonlocal slide_count
+        sl = prs.slides.add_slide(blank_layout)
+        slide_count += 1
+        t_box = sl.shapes.add_textbox(Inches(margin_x_in), Inches(0.28), Inches(content_w_in), Inches(0.60))
+        t_box.text_frame.word_wrap = True
         p = t_box.text_frame.paragraphs[0]
-        p.text = ws.title
-        p.font.size = Pt(28)
+        p.text = title_txt[:115]
+        p.font.size = Pt(22 if len(title_txt) < 55 else 18)
         p.font.bold = True
+        p.font.color.rgb = RGBColor(15, 23, 42)
+        return sl
 
-        rows_data = []
-        for row in ws.iter_rows(values_only=True):
-            if any(v is not None and str(v).strip() != "" for v in row):
-                last_idx = max(i for i, v in enumerate(row) if v is not None and str(v).strip() != "")
-                rows_data.append(row[:last_idx + 1])
+    try:
+        for sh in sheets:
+            if sh["is_empty"] and not sh["images"]:
+                sl = _new_sheet_slide(sh["title"])
+                tx = sl.shapes.add_textbox(Inches(margin_x_in), Inches(1.4), Inches(content_w_in), Inches(1.0))
+                p_emp = tx.text_frame.paragraphs[0]
+                p_emp.text = "(Empty worksheet — no data)"
+                p_emp.font.size = Pt(14)
+                p_emp.font.italic = True
+                p_emp.font.color.rgb = RGBColor(100, 116, 139)
+                continue
 
-        if rows_data:
-            num_rows = len(rows_data)
-            num_cols = max(len(r) for r in rows_data)
-            shape = slide.shapes.add_table(num_rows, num_cols, Inches(0.8), Inches(1.8), Inches(11.7), Inches(min(num_rows * 0.4 + 0.5, 5.0)))
-            t = shape.table
-            for r_i, r in enumerate(rows_data):
-                for c_i, val in enumerate(r):
-                    cell = t.cell(r_i, c_i)
-                    cell.text = "" if val is None else str(val)
-                    if r_i == 0 and cell.text_frame.paragraphs:
-                        cell.text_frame.paragraphs[0].font.bold = True
-        else:
-            tx = slide.shapes.add_textbox(Inches(0.8), Inches(2.0), Inches(11.7), Inches(1.0))
-            tx.text_frame.paragraphs[0].text = "(Empty worksheet)"
+            cur_slide = _new_sheet_slide(sh["title"])
+            cur_y_in = top_body_in
 
-    out_io = io.BytesIO()
-    prs.save(out_io)
-    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", sheet_count
+            if not sh["is_empty"] and sh["rows"]:
+                # Adapt sheet grid to _render_styled_pptx_table_slice cell schema
+                adapted_rows: List[List[dict]] = []
+                for r in sh["rows"]:
+                    a_row: List[dict] = []
+                    for c in r:
+                        a_row.append({
+                            "is_origin": c["is_origin"],
+                            "fill": c["fill"],
+                            "paras": [{
+                                "plain_text": c["text"],
+                                "segments": [{
+                                    "text": c["text"],
+                                    "bold": c["bold"],
+                                    "italic": c["italic"],
+                                    "color": c["color"],
+                                    "url": c["url"],
+                                }],
+                            }] if c["is_origin"] and c["text"] != "" else [],
+                        })
+                    adapted_rows.append(a_row)
+
+                col_widths_pt, _ = _compute_xlsx_col_widths(sh, content_w_in * 72.0)
+                num_cols = len(col_widths_pt)
+                rep_cnt = sh["repeat_hdr_rows"]
+                hdr_slice = adapted_rows[:rep_cnt] if rep_cnt > 0 else []
+                data_rows = adapted_rows[rep_cnt:] if rep_cnt > 0 else adapted_rows
+                hdr_spans = [(c0, r0, c1, r1) for (c0, r0, c1, r1) in sh["span_cmds"] if r1 < rep_cnt]
+
+                if not data_rows:
+                    data_rows = adapted_rows
+                    hdr_slice = []
+                    hdr_spans = []
+                    rep_cnt = 0
+
+                max_data_per_slide = 12 if num_cols <= 7 else 10
+                if len(data_rows) <= max_data_per_slide + 2:
+                    avail_h_in = max_y_in - cur_y_in
+                    act_h_emu = _render_styled_pptx_table_slice(
+                        cur_slide,
+                        adapted_rows,
+                        sh["span_cmds"],
+                        rep_cnt,
+                        Inches(margin_x_in),
+                        Inches(cur_y_in),
+                        Inches(content_w_in),
+                        Inches(avail_h_in),
+                        col_widths_pt,
+                    )
+                    cur_y_in += (act_h_emu / Inches(1)) + 0.16
+                else:
+                    start_idx = 0
+                    part_no = 1
+                    while start_idx < len(data_rows):
+                        if part_no > 1:
+                            cur_slide = _new_sheet_slide(f"{sh['title']} (Part {part_no})")
+                            cur_y_in = top_body_in
+                        end_idx = min(start_idx + max_data_per_slide, len(data_rows))
+                        chunk_rows = hdr_slice + data_rows[start_idx:end_idx]
+                        chunk_spans = list(hdr_spans)
+                        orig_start = rep_cnt + start_idx
+                        orig_end = rep_cnt + end_idx - 1
+                        for c0, r0, c1, r1 in sh["span_cmds"]:
+                            if r0 >= orig_start and r1 <= orig_end:
+                                chunk_spans.append((c0, r0 - start_idx, c1, r1 - start_idx))
+                        act_h_emu = _render_styled_pptx_table_slice(
+                            cur_slide,
+                            chunk_rows,
+                            chunk_spans,
+                            rep_cnt,
+                            Inches(margin_x_in),
+                            Inches(cur_y_in),
+                            Inches(content_w_in),
+                            Inches(max_y_in - cur_y_in),
+                            col_widths_pt,
+                        )
+                        cur_y_in += (act_h_emu / Inches(1)) + 0.16
+                        start_idx = end_idx
+                        part_no += 1
+
+            # Place sheet images cleanly below table if generous space remains, else on a dedicated visual slide
+            if sh["images"]:
+                imgs = sh["images"]
+                rem_h_in = max_y_in - cur_y_in
+                if rem_h_in >= 2.15:
+                    slot_w_in = (content_w_in - 0.25 * (len(imgs) - 1)) / len(imgs)
+                    for idx_im, im_info in enumerate(imgs):
+                        bx_left = Inches(margin_x_in + idx_im * (slot_w_in + 0.25))
+                        _add_aspect_fit_picture(cur_slide, im_info["bytes"], bx_left, Inches(cur_y_in), Inches(slot_w_in), Inches(rem_h_in))
+                else:
+                    for idx_im, im_info in enumerate(imgs):
+                        vis_slide = _new_sheet_slide(f"{sh['title']} — Visual {idx_im + 1}" if len(imgs) > 1 else f"{sh['title']} — Visual")
+                        _add_aspect_fit_picture(vis_slide, im_info["bytes"], Inches(margin_x_in), Inches(top_body_in), Inches(content_w_in), Inches(max_y_in - top_body_in))
+
+        out_io = io.BytesIO()
+        prs.save(out_io)
+        return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.presentationml.presentation", f"{base_name}.pptx", slide_count
+    finally:
+        sheets.clear()
+        gc.collect()
 
 
 def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple[bytes, str, str, int]:
@@ -3610,34 +4892,42 @@ def csv_to_xlsx(csv_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", 1
 
 
-def xlsx_to_csv(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Exports Excel workbook to single CSV or ZIP of CSVs if multi-sheet."""
-    wb = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), data_only=True)
-    sheet_count = len(wb.worksheets)
+def _render_xlsx_sheet_csv_bytes(sheet: Dict[str, Any]) -> bytes:
+    """Renders a normalized XLSX sheet model to RFC-4180 UTF-8-SIG CSV bytes."""
+    sio = io.StringIO()
+    writer = csv.writer(sio, dialect="excel", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
+    for row in sheet["rows"]:
+        vals = [c["text"] if c["is_origin"] else "" for c in row]
+        if any(v != "" for v in vals):
+            writer.writerow(vals)
+    return sio.getvalue().encode("utf-8-sig")
 
-    if sheet_count == 1:
-        ws = wb.active
-        sio = io.StringIO()
-        writer = csv.writer(sio)
-        for row in ws.iter_rows(values_only=True):
-            if any(v is not None and str(v).strip() != "" for v in row):
-                last_idx = max(i for i, v in enumerate(row) if v is not None and str(v).strip() != "")
-                writer.writerow([("" if v is None else str(v)) for v in row[:last_idx + 1]])
-        csv_bytes = sio.getvalue().encode("utf-8-sig")
-        return csv_bytes, "text/csv; charset=utf-8", f"{base_name}.csv", 1
-    else:
+
+def xlsx_to_csv(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+    """Exports Excel workbook to RFC-4180 UTF-8-SIG CSV (or ZIP of CSVs if multi-sheet, skipping blank sheets)."""
+    sheets = _extract_xlsx_workbook_model(xlsx_bytes)
+    try:
+        sheet_count = len(sheets)
+        if sheet_count <= 1:
+            if not sheets or sheets[0]["is_empty"]:
+                return b"\xef\xbb\xbf", "text/csv; charset=utf-8", f"{base_name}.csv", 1
+            return _render_xlsx_sheet_csv_bytes(sheets[0]), "text/csv; charset=utf-8", f"{base_name}.csv", 1
+
+        non_empty_sheets = [sh for sh in sheets if not sh["is_empty"] and sh["rows"]]
+        if not non_empty_sheets:
+            return b"\xef\xbb\xbf", "text/csv; charset=utf-8", f"{base_name}.csv", 1
+
         zip_buf = io.BytesIO()
+        used_names: Set[str] = set()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for ws in wb.worksheets:
-                sio = io.StringIO()
-                writer = csv.writer(sio)
-                for row in ws.iter_rows(values_only=True):
-                    if any(v is not None and str(v).strip() != "" for v in row):
-                        last_idx = max(i for i, v in enumerate(row) if v is not None and str(v).strip() != "")
-                        writer.writerow([("" if v is None else str(v)) for v in row[:last_idx + 1]])
-                clean_title = re.sub(r'[\\/*?:"<>|]', '_', ws.title).strip() or "sheet"
-                zf.writestr(f"{clean_title}.csv", sio.getvalue().encode("utf-8-sig"))
-        return zip_buf.getvalue(), "application/zip", f"{base_name}_csv_sheets.zip", sheet_count
+            for sh in non_empty_sheets:
+                clean_title = re.sub(r'[\\/*?:"<>|]', "_", sh["title"]).strip() or "sheet"
+                entry_name = get_unique_zip_name(f"{clean_title}.csv", used_names)
+                zf.writestr(entry_name, _render_xlsx_sheet_csv_bytes(sh))
+        return zip_buf.getvalue(), "application/zip", f"{base_name}_csv_sheets.zip", len(non_empty_sheets)
+    finally:
+        sheets.clear()
+        gc.collect()
 
 
 # --- Text & Web Formats (.txt, .md, .html) ---
@@ -3876,14 +5166,32 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
         if input_fmt == "csv":
             text = data_bytes.decode("utf-8", errors="replace")
         else:
-            wb = openpyxl.load_workbook(io.BytesIO(data_bytes), data_only=True)
-            parts = []
-            for ws in wb.worksheets:
-                parts.append(f"=== Sheet: {ws.title} ===")
-                for row in ws.iter_rows(values_only=True):
-                    if any(v is not None for v in row):
-                        parts.append("\t".join("" if v is None else str(v) for v in row))
-            text = "\n".join(parts)
+            sheets = _extract_xlsx_workbook_model(data_bytes)
+            try:
+                parts: List[str] = []
+                for sh in sheets:
+                    parts.append(f"=== Sheet: {sh['title']} ===")
+                    if sh["is_empty"] or not sh["rows"]:
+                        parts.append("(Empty sheet)")
+                        continue
+                    for r in sh["rows"]:
+                        row_vals: List[str] = []
+                        for c in r:
+                            if not c["is_origin"]:
+                                row_vals.append("")
+                            else:
+                                cell_txt = re.sub(r"[\t\r\n]+", " ", c["text"]).strip()
+                                if c["url"] and c["url"] not in cell_txt:
+                                    cell_txt = f"{cell_txt} ({c['url']})".strip() if cell_txt else c["url"]
+                                row_vals.append(cell_txt)
+                        while row_vals and row_vals[-1] == "":
+                            row_vals.pop()
+                        if row_vals:
+                            parts.append("\t".join(row_vals))
+                text = "\n".join(parts)
+            finally:
+                sheets.clear()
+                gc.collect()
 
     elif input_fmt == "pptx":
         prs = Presentation(io.BytesIO(data_bytes))
@@ -4407,18 +5715,44 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
     elif input_fmt in ("xlsx", "csv"):
         if input_fmt == "csv":
             xlsx_data, _, _, _ = csv_to_xlsx(data_bytes, base_name)
-            wb = openpyxl.load_workbook(io.BytesIO(xlsx_data), data_only=True)
+            sheets = _extract_xlsx_workbook_model(xlsx_data)
         else:
-            wb = openpyxl.load_workbook(io.BytesIO(data_bytes), data_only=True)
+            sheets = _extract_xlsx_workbook_model(data_bytes)
 
-        parts = []
-        for ws in wb.worksheets:
-            parts.append(f"## Sheet: {ws.title}\n")
-            rows = [r for r in ws.iter_rows(values_only=True) if any(v is not None for v in r)]
-            if rows:
-                rows_grid = [["" if v is None else str(v) for v in r] for r in rows]
-                parts.append(_format_md_table(rows_grid) + "\n")
-        md_text = "\n".join(parts)
+        try:
+            parts: List[str] = []
+            for sh in sheets:
+                parts.append(f"## Sheet: {sh['title']}\n")
+                if sh["is_empty"] or not sh["rows"]:
+                    parts.append("*(Empty worksheet)*\n")
+                    continue
+
+                b_rows = sh["banner_rows"] if sh["banner_rows"] < len(sh["rows"]) else 0
+                for b_idx in range(b_rows):
+                    b_txt = " ".join(c["text"].strip() for c in sh["rows"][b_idx] if c["is_origin"] and c["text"].strip()).strip()
+                    if b_txt:
+                        parts.append(f"### {b_txt}\n" if b_idx == 0 else f"> {b_txt}\n")
+
+                tbl_rows = sh["rows"][b_rows:]
+                if tbl_rows:
+                    rows_grid: List[List[str]] = []
+                    for r in tbl_rows:
+                        r_strs: List[str] = []
+                        for c in r:
+                            if not c["is_origin"]:
+                                r_strs.append("")
+                            elif c["url"]:
+                                lbl = re.sub(r"\s*\n\s*", " ", c["text"]).strip() or c["url"]
+                                lbl = lbl.replace("[", "\\[").replace("]", "\\]")
+                                r_strs.append(f"[{lbl}]({c['url']})")
+                            else:
+                                r_strs.append(c["text"])
+                        rows_grid.append(r_strs)
+                    parts.append(_format_md_table(rows_grid) + "\n")
+            md_text = "\n".join(parts)
+        finally:
+            sheets.clear()
+            gc.collect()
 
     elif input_fmt == "pdf":
         return pdf_to_md(data_bytes, base_name)
@@ -4650,11 +5984,97 @@ def _docx_to_html_body(docx_bytes: bytes) -> str:
     return "\n".join(parts)
 
 
+def _xlsx_to_html_body(xlsx_bytes: bytes) -> str:
+    """Converts an XLSX workbook into responsive HTML5 with sheet navigation, colspan/rowspan, shading, links, and base64 images."""
+    sheets = _extract_xlsx_workbook_model(xlsx_bytes)
+    parts: List[str] = []
+    try:
+        if sheets:
+            nav_links = [
+                f'<a class="sheet-pill" href="#sheet-{idx}">{html.escape(sh["title"])}</a>'
+                for idx, sh in enumerate(sheets)
+            ]
+            parts.append(f'<nav class="sheet-nav" aria-label="Worksheet navigation">{"".join(nav_links)}</nav>')
+
+        for s_idx, sh in enumerate(sheets):
+            parts.append(f'<section id="sheet-{s_idx}" class="xlsx-sheet">')
+            parts.append(f'<h2>{html.escape(sh["title"])}</h2>')
+
+            if sh["is_empty"] and not sh["images"]:
+                parts.append('<p class="sheet-empty">(Empty worksheet — no data)</p>')
+                parts.append("</section>")
+                continue
+
+            if not sh["is_empty"] and sh["rows"]:
+                span_map = {(r0, c0): (c1 - c0 + 1, r1 - r0 + 1) for c0, r0, c1, r1 in sh["span_cmds"]}
+                tbl_html: List[str] = ['<div class="table-wrap"><table>']
+                for r_idx, row in enumerate(sh["rows"]):
+                    is_hdr = r_idx < sh["repeat_hdr_rows"]
+                    tbl_html.append("<tr>")
+                    for c_idx, cell in enumerate(row):
+                        if not cell["is_origin"]:
+                            continue
+                        cs, rs = span_map.get((r_idx, c_idx), (1, 1))
+                        attrs: List[str] = []
+                        if cs > 1:
+                            attrs.append(f'colspan="{cs}"')
+                        if rs > 1:
+                            attrs.append(f'rowspan="{rs}"')
+
+                        fill_hex = cell["fill"] or ("F8FAFC" if r_idx % 2 == 1 else "FFFFFF")
+                        dark_bg = _is_dark_hex(fill_hex)
+                        fg_hex = cell["color"] or ("FFFFFF" if dark_bg else "0F172A")
+                        style_parts = [
+                            f"background-color:#{html.escape(fill_hex)}",
+                            f"color:#{html.escape(fg_hex)}",
+                            f"text-align:{html.escape(cell['align'])}",
+                        ]
+                        if cell["bold"] or is_hdr:
+                            style_parts.append("font-weight:700")
+                        if cell["italic"]:
+                            style_parts.append("font-style:italic")
+                        attrs.append(f'style="{"; ".join(style_parts)};"')
+
+                        esc_txt = html.escape(cell["text"]).replace("\n", "<br>")
+                        if cell["url"]:
+                            esc_url = html.escape(cell["url"], quote=True)
+                            link_col = "93C5FD" if dark_bg else "2563EB"
+                            inner_html = f'<a href="{esc_url}" target="_blank" rel="noopener" style="color:#{link_col};">{esc_txt}</a>'
+                        else:
+                            inner_html = esc_txt
+
+                        tag = "th" if is_hdr else "td"
+                        tbl_html.append(f'<{tag} {" ".join(attrs)}>{inner_html}</{tag}>')
+                    tbl_html.append("</tr>")
+                tbl_html.append("</table></div>")
+                parts.append("".join(tbl_html))
+
+            if sh["images"]:
+                for im_info in sh["images"]:
+                    b64 = base64.b64encode(im_info["bytes"]).decode("ascii")
+                    max_px = max(int(im_info["disp_w_pt"] * 1.333), 240)
+                    parts.append(
+                        f'<figure class="doc-figure">'
+                        f'<img src="data:image/png;base64,{b64}" alt="Sheet diagram" style="max-width: min(100%, {max_px}px); height: auto;">'
+                        f'</figure>'
+                    )
+                    del b64
+
+            parts.append("</section>")
+
+        return "\n".join(parts)
+    finally:
+        sheets.clear()
+        gc.collect()
+
+
 def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates a clean responsive HTML5 document from any file format."""
     norm_fmt = input_fmt.lower().replace("jpeg", "jpg")
     if norm_fmt == "docx":
         body_html = _docx_to_html_body(data_bytes)
+    elif norm_fmt == "xlsx":
+        body_html = _xlsx_to_html_body(data_bytes)
     else:
         md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
         body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
@@ -4665,9 +6085,14 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
   <meta charset="UTF-8">
   <title>{html.escape(base_name)}</title>
   <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "DejaVu Sans", sans-serif; line-height: 1.6; max-width: 960px; margin: 40px auto; padding: 0 24px; color: #1e293b; background: #ffffff; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "DejaVu Sans", sans-serif; line-height: 1.6; max-width: 1120px; margin: 36px auto; padding: 0 24px; color: #1e293b; background: #ffffff; }}
     h1, h2, h3, h4 {{ color: #0f172a; margin-top: 1.4em; }}
     h1, h2 {{ border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }}
+    .sheet-nav {{ position: sticky; top: 8px; z-index: 20; display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; margin-bottom: 22px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 10px; }}
+    .sheet-pill {{ display: inline-block; padding: 4px 12px; border-radius: 9999px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-size: 0.85rem; font-weight: 600; text-decoration: none; }}
+    .sheet-pill:hover {{ background: #eff6ff; border-color: #2563eb; color: #2563eb; }}
+    .xlsx-sheet {{ margin-bottom: 34px; }}
+    .sheet-empty {{ color: #64748b; font-style: italic; }}
     .doc-header, .doc-footer {{ font-size: 0.82rem; color: #64748b; padding: 8px 0; border-bottom: 1px solid #e2e8f0; margin-bottom: 18px; }}
     .doc-footer {{ border-bottom: none; border-top: 1px solid #e2e8f0; margin-top: 28px; }}
     .doc-figure {{ margin: 18px 0; }}
@@ -4677,8 +6102,8 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
     .doc-callout {{ margin: 14px 0; padding: 12px 16px; border-radius: 6px; color: #1e293b; }}
     .page-break {{ border: none; border-top: 1px dashed #cbd5e1; margin: 28px 0; }}
     .table-wrap {{ width: 100%; overflow-x: auto; margin: 18px 0; }}
-    table {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
-    th, td {{ border: 1px solid #cbd5e1; padding: 7px 10px; text-align: left; vertical-align: middle; }}
+    table {{ border-collapse: collapse; width: 100%; font-size: 0.88rem; }}
+    th, td {{ border: 1px solid #cbd5e1; padding: 6px 10px; text-align: left; vertical-align: middle; }}
     th {{ font-weight: 600; }}
     code {{ background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-family: "Consolas", "DejaVu Sans Mono", monospace; }}
     pre {{ background: #f1f5f9; padding: 14px 16px; border-radius: 6px; overflow-x: auto; border: 1px solid #e2e8f0; }}
