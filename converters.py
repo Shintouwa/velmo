@@ -22,7 +22,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
 import pymupdf as fitz  # PyMuPDF
-from PIL import Image
+from PIL import Image, ImageOps
 import img2pdf
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Border, Side
@@ -303,8 +303,65 @@ def validate_input_file(filename: str, raw_bytes: bytes) -> None:
                 raise ValueError(f"Invalid text encoding in file '{filename}': {e}")
 
 
+def _normalize_image_bytes(
+    image_bytes: bytes,
+    flatten_alpha: bool = False,
+    target_format: str = "PNG",
+    max_side: Optional[int] = None,
+    quality: int = 95,
+) -> Tuple[bytes, int, int]:
+    """
+    Applies EXIF orientation normalization (ImageOps.exif_transpose), optional alpha-to-white
+    compositing, optional bounding resize for 512MB RAM safety, and returns (bytes, w, h).
+    """
+    with Image.open(io.BytesIO(image_bytes)) as raw_im:
+        im = ImageOps.exif_transpose(raw_im)
+        try:
+            has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+            if flatten_alpha:
+                if has_alpha:
+                    im_rgba = im.convert("RGBA")
+                    bg = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
+                    out_im = Image.alpha_composite(bg, im_rgba).convert("RGB")
+                elif im.mode != "RGB":
+                    out_im = im.convert("RGB")
+                else:
+                    out_im = im
+            else:
+                if im.mode in ("LA",) or (im.mode == "P" and "transparency" in im.info):
+                    out_im = im.convert("RGBA")
+                elif im.mode not in ("RGB", "RGBA", "L"):
+                    out_im = im.convert("RGB")
+                else:
+                    out_im = im
+
+            if max_side and max(out_im.size) > max_side:
+                if out_im is im:
+                    out_im = out_im.copy()
+                out_im.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+
+            w, h = out_im.size
+            buf = io.BytesIO()
+            fmt_upper = target_format.upper().replace("JPG", "JPEG")
+            if fmt_upper == "JPEG":
+                if out_im.mode != "RGB":
+                    out_im = out_im.convert("RGB")
+                out_im.save(buf, format="JPEG", quality=quality)
+            elif fmt_upper == "WEBP":
+                out_im.save(buf, format="WEBP", quality=quality)
+            else:
+                out_im.save(buf, format="PNG")
+            return buf.getvalue(), w, h
+        finally:
+            if im is not raw_im:
+                try:
+                    im.close()
+                except Exception:
+                    pass
+
+
 def process_image_for_pdf(image_bytes: bytes, filename: str) -> bytes:
-    """Prepares an image for lossless embedding via img2pdf, flattening any alpha channel."""
+    """Prepares an image for lossless embedding via img2pdf, normalizing EXIF orientation and flattening alpha."""
     if not image_bytes:
         raise ValueError(f"File '{filename}' is empty.")
 
@@ -312,23 +369,36 @@ def process_image_for_pdf(image_bytes: bytes, filename: str) -> bytes:
         with Image.open(io.BytesIO(image_bytes)) as im:
             format_name = (im.format or "").upper()
             mode = im.mode
+            exif_ori = im.getexif().get(0x0112)
+            needs_transpose = exif_ori not in (None, 1)
             has_alpha = mode in ("RGBA", "LA") or (mode == "P" and "transparency" in im.info)
 
-            if format_name == "WEBP" or has_alpha or mode not in ("RGB", "L", "1"):
-                if has_alpha:
-                    im_rgba = im.convert("RGBA")
-                    background = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
-                    composite = Image.alpha_composite(background, im_rgba)
-                    rgb_img = composite.convert("RGB")
-                else:
-                    rgb_img = im.convert("RGB")
+            if needs_transpose or format_name == "WEBP" or has_alpha or mode not in ("RGB", "L", "1"):
+                transposed = ImageOps.exif_transpose(im)
+                try:
+                    if has_alpha:
+                        im_rgba = transposed.convert("RGBA")
+                        background = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
+                        composite = Image.alpha_composite(background, im_rgba)
+                        rgb_img = composite.convert("RGB")
+                    else:
+                        rgb_img = transposed.convert("RGB")
 
-                out_buf = io.BytesIO()
-                save_kwargs = {"format": "PNG"}
-                if "dpi" in im.info:
-                    save_kwargs["dpi"] = im.info["dpi"]
-                rgb_img.save(out_buf, **save_kwargs)
-                return out_buf.getvalue()
+                    out_buf = io.BytesIO()
+                    if format_name == "JPEG" and not has_alpha:
+                        save_kwargs = {"format": "JPEG", "quality": 95}
+                    else:
+                        save_kwargs = {"format": "PNG"}
+                    if "dpi" in im.info and not needs_transpose:
+                        save_kwargs["dpi"] = im.info["dpi"]
+                    rgb_img.save(out_buf, **save_kwargs)
+                    return out_buf.getvalue()
+                finally:
+                    if transposed is not im:
+                        try:
+                            transposed.close()
+                        except Exception:
+                            pass
 
             try:
                 img2pdf.convert([image_bytes])
@@ -346,10 +416,17 @@ def process_image_for_pdf(image_bytes: bytes, filename: str) -> bytes:
 
 
 def extract_ocr_items(image_bytes: bytes) -> List[dict]:
-    """Runs RapidOCR and returns normalized parsed box items."""
+    """Normalizes EXIF orientation & alpha, then runs RapidOCR and returns parsed box items."""
+    ocr_bytes = None
     try:
+        ocr_bytes, _, _ = _normalize_image_bytes(
+            image_bytes,
+            flatten_alpha=True,
+            target_format="PNG",
+            max_side=1600,
+        )
         ocr = get_ocr_engine()
-        res, _ = ocr(image_bytes)
+        res, _ = ocr(ocr_bytes)
         if not res:
             return []
 
@@ -357,6 +434,10 @@ def extract_ocr_items(image_bytes: bytes) -> List[dict]:
         for box, text, score in res:
             text_clean = text.strip()
             if not text_clean:
+                continue
+            if score < 0.50:
+                continue
+            if len(text_clean) == 1 and score < 0.72 and not text_clean.isdigit():
                 continue
             xs = [pt[0] for pt in box]
             ys = [pt[1] for pt in box]
@@ -374,8 +455,11 @@ def extract_ocr_items(image_bytes: bytes) -> List[dict]:
                 'text': text_clean,
                 'score': score
             })
+        if len(items) == 1 and len(items[0]["text"]) <= 2 and items[0]["score"] < 0.80 and not items[0]["text"].isdigit():
+            return []
         return items
     finally:
+        del ocr_bytes
         gc.collect()
 
 
@@ -462,31 +546,20 @@ def convert_image_format(
     base_name: str,
     image_quality: int = 95
 ) -> Tuple[bytes, str, str, int]:
-    """Converts directly between PNG, JPG, and WebP images."""
+    """Converts directly between PNG, JPG, and WebP images with EXIF normalization and alpha safety."""
     target_fmt = target_fmt.lower().replace("jpeg", "jpg")
-    with Image.open(io.BytesIO(image_bytes)) as im:
-        buf = io.BytesIO()
-        if target_fmt == "jpg":
-            # Flatten transparency onto white background at quality
-            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
-                im_rgba = im.convert("RGBA")
-                bg = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))
-                comp = Image.alpha_composite(bg, im_rgba).convert("RGB")
-            else:
-                comp = im.convert("RGB")
-            comp.save(buf, format="JPEG", quality=image_quality)
-            return buf.getvalue(), "image/jpeg", f"{base_name}.jpg", 1
+    if target_fmt not in ("png", "jpg", "webp"):
+        raise ValueError(f"Unsupported image target format: {target_fmt}")
 
-        elif target_fmt == "png":
-            im.save(buf, format="PNG")
-            return buf.getvalue(), "image/png", f"{base_name}.png", 1
-
-        elif target_fmt == "webp":
-            im.save(buf, format="WEBP", quality=image_quality)
-            return buf.getvalue(), "image/webp", f"{base_name}.webp", 1
-
-        else:
-            raise ValueError(f"Unsupported image target format: {target_fmt}")
+    out_bytes, _, _ = _normalize_image_bytes(
+        image_bytes,
+        flatten_alpha=(target_fmt == "jpg"),
+        target_format=target_fmt,
+        max_side=None,
+        quality=image_quality,
+    )
+    mime_map = {"jpg": "image/jpeg", "png": "image/png", "webp": "image/webp"}
+    return out_bytes, mime_map[target_fmt], f"{base_name}.{target_fmt}", 1
 
 
 def _release_pdf_memory():
@@ -1935,8 +2008,10 @@ def _structure_ocr_blocks(items: List[dict]) -> List[Dict[str, Any]]:
             "is_multi": len(merged_spans) >= 2,
         })
 
-    all_heights = [sp["height"] for sl in span_lines for sp in sl["spans"]]
-    median_h = statistics.median(all_heights) if all_heights else 20.0
+    all_heights = sorted(sp["height"] for sl in span_lines for sp in sl["spans"] if sp["height"] >= 8.0)
+    if not all_heights:
+        all_heights = sorted(sp["height"] for sl in span_lines for sp in sl["spans"])
+    body_h = all_heights[len(all_heights) // 4] if len(all_heights) >= 4 else (statistics.median(all_heights) if all_heights else 20.0)
 
     blocks: List[Dict[str, Any]] = []
     i = 0
@@ -1966,14 +2041,53 @@ def _structure_ocr_blocks(items: List[dict]) -> List[Dict[str, Any]]:
                     i = j
                     continue
 
-        # Prose or heading line
+        # Prose, bullet list item, or heading line
         line_text = " ".join(s["text"] for s in sl["spans"]).strip()
         avg_h = sl["height"]
-        if avg_h >= 1.28 * median_h and len(line_text) < 110:
+        is_bullet = bool(re.match(r"^(?:[•●▪◦]\s*\S|[-*]\s+[A-Za-z0-9(]|[-*][A-Za-z])", line_text))
+        is_num_list = bool(re.match(r"^\d{1,2}[.)]\s+[A-Za-z(]", line_text))
+
+        if is_bullet:
             flush_para()
-            lvl = 1 if avg_h >= 1.55 * median_h else 2
-            blocks.append({"type": "heading", "level": lvl, "text": line_text})
+            m_b = re.match(r"^(?:[•●▪◦]|[-*])\s*(.+)$", line_text)
+            item_txt = m_b.group(1).strip() if m_b else line_text
+            blocks.append({"type": "list_item", "ordered": False, "text": item_txt})
+        elif is_num_list:
+            flush_para()
+            m_n = re.match(r"^(\d{1,2}[.)])\s+(.+)$", line_text)
+            blocks.append({
+                "type": "list_item",
+                "ordered": True,
+                "marker": m_n.group(1) if m_n else "1.",
+                "text": m_n.group(2).strip() if m_n else line_text,
+            })
+        elif len(line_text) < 110 and avg_h >= 1.45 * body_h:
+            flush_para()
+            blocks.append({"type": "heading", "level": 1, "text": line_text})
+        elif len(line_text) < 110 and avg_h >= 1.22 * body_h and not line_text.endswith("."):
+            flush_para()
+            blocks.append({"type": "heading", "level": 2, "text": line_text})
         else:
+            prev_y = span_lines[i - 1]["y_center"] if i > 0 else None
+            dy_above = (sl["y_center"] - prev_y) if prev_y is not None else 999.0
+            next_w = (
+                (span_lines[i + 1]["spans"][-1]["x_max"] - span_lines[i + 1]["spans"][0]["x_min"])
+                if (i + 1 < n and not span_lines[i + 1]["is_multi"] and span_lines[i + 1]["spans"])
+                else 0.0
+            )
+            cur_w = max(sl["spans"][-1]["x_max"] - sl["spans"][0]["x_min"], 1.0)
+            if (
+                len(line_text) < 85
+                and not line_text.endswith((".", ",", ";"))
+                and dy_above >= 1.8 * max(avg_h, body_h)
+                and avg_h >= 1.12 * body_h
+                and (next_w > cur_w * 1.25 or (i + 1 < n and span_lines[i + 1]["is_multi"]))
+            ):
+                flush_para()
+                blocks.append({"type": "heading", "level": 2, "text": line_text})
+                i += 1
+                continue
+
             if para_buf:
                 prev_sl = para_buf[-1]
                 dy = sl["y_center"] - prev_sl["y_center"]
@@ -1988,7 +2102,7 @@ def _structure_ocr_blocks(items: List[dict]) -> List[Dict[str, Any]]:
 
 
 def _append_ocr_blocks_to_docx(doc: Document, blocks: List[Dict[str, Any]], insert_before_elem=None):
-    """Appends structured OCR headings, paragraphs, and Word tables to a python-docx Document."""
+    """Appends structured OCR headings, paragraphs, list items, and Word tables to a python-docx Document."""
     created_elems = []
     for blk in blocks:
         btype = blk["type"]
@@ -1997,6 +2111,14 @@ def _append_ocr_blocks_to_docx(doc: Document, blocks: List[Dict[str, Any]], inse
             created_elems.append(el._p)
         elif btype == "paragraph":
             el = doc.add_paragraph(blk["text"])
+            created_elems.append(el._p)
+        elif btype == "list_item":
+            style_name = "List Number" if blk.get("ordered") else "List Bullet"
+            try:
+                el = doc.add_paragraph(blk["text"], style=style_name)
+            except Exception:
+                prefix = f"{blk.get('marker', '1.')} " if blk.get("ordered") else "- "
+                el = doc.add_paragraph(f"{prefix}{blk['text']}")
             created_elems.append(el._p)
         elif btype == "table":
             rows = blk["rows"]
@@ -2229,8 +2351,9 @@ def pdf_to_xlsx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
                         last_header_sig = tuple(c.strip() for c in blk["rows"][0])
                         last_next_row = next_r
                         last_table_page = p_no
-                    elif blk["type"] in ("heading", "paragraph") and blk.get("text"):
-                        document_text_blocks.append((p_no, blk["text"]))
+                    elif blk["type"] in ("heading", "paragraph", "list_item") and blk.get("text"):
+                        txt_line = f"- {blk['text']}" if blk["type"] == "list_item" else blk["text"]
+                        document_text_blocks.append((p_no, txt_line))
                 continue
 
             tabs = _find_pdf_tables(page)
@@ -3518,6 +3641,7 @@ def xlsx_to_png(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int
 # --- OCR Converters ---
 
 def images_to_docx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple[bytes, str, str, int]:
+    """Converts one or multiple images into a structured Word document with headings, lists, and real tables via OCR."""
     if not image_list:
         raise ValueError("No images provided.")
 
@@ -3527,37 +3651,14 @@ def images_to_docx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
             doc.add_page_break()
 
         items = extract_ocr_items(img_bytes)
-        if not items:
+        blocks = _structure_ocr_blocks(items)
+        if not blocks:
             doc.add_paragraph(f"(No text detected on image: {filename})")
             continue
 
-        median_h = statistics.median([it['height'] for it in items])
-        items_sorted = sorted(items, key=lambda it: it['y_center'])
-        lines: List[List[dict]] = []
-
-        for item in items_sorted:
-            placed = False
-            for line in lines:
-                line_y = sum(it['y_center'] for it in line) / len(line)
-                line_h = sum(it['height'] for it in line) / len(line)
-                if abs(item['y_center'] - line_y) <= max(line_h, item['height']) * 0.55:
-                    line.append(item)
-                    placed = True
-                    break
-            if not placed:
-                lines.append([item])
-
-        lines.sort(key=lambda ln: sum(it['y_center'] for it in ln) / len(ln))
-
-        for line in lines:
-            line.sort(key=lambda it: it['x_min'])
-            line_text = " ".join(it['text'] for it in line)
-            avg_h = sum(it['height'] for it in line) / len(line)
-
-            if avg_h >= 1.35 * median_h and len(line_text) < 100:
-                doc.add_heading(line_text, level=1 if avg_h >= 1.6 * median_h else 2)
-            else:
-                doc.add_paragraph(line_text)
+        _append_ocr_blocks_to_docx(doc, blocks)
+        del items, blocks
+        gc.collect()
 
     out_io = io.BytesIO()
     doc.save(out_io)
@@ -3566,6 +3667,7 @@ def images_to_docx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
 
 
 def images_to_xlsx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple[bytes, str, str, int]:
+    """Converts one or multiple images into a structured Excel workbook via OCR block & table clustering."""
     if not image_list:
         raise ValueError("No images provided.")
 
@@ -3587,77 +3689,42 @@ def images_to_xlsx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
         ws = wb.create_sheet(title=sheet_title)
 
         items = extract_ocr_items(img_bytes)
-        if not items:
-            ws.cell(row=1, column=1, value="(No text detected on image)")
+        blocks = _structure_ocr_blocks(items)
+        if not blocks:
+            ws.cell(row=1, column=1, value=f"(No text detected on image: {filename})")
             continue
 
-        items_sorted = sorted(items, key=lambda it: it['y_center'])
-        rows: List[List[dict]] = []
-        for item in items_sorted:
-            placed = False
-            for r in rows:
-                r_y = sum(it['y_center'] for it in r) / len(r)
-                r_h = sum(it['height'] for it in r) / len(r)
-                if abs(item['y_center'] - r_y) <= max(r_h, item['height']) * 0.6:
-                    r.append(item)
-                    placed = True
-                    break
-            if not placed:
-                rows.append([item])
-
-        rows.sort(key=lambda r: sum(it['y_center'] for it in r) / len(r))
-
-        all_x = sorted([it['x_center'] for it in items])
-        col_clusters: List[List[float]] = []
-        col_tol = 50.0
-        for r in rows:
-            if len(r) > 1:
-                r_s = sorted(r, key=lambda it: it['x_center'])
-                for k in range(len(r_s) - 1):
-                    dist = r_s[k+1]['x_center'] - r_s[k]['x_center']
-                    if 15 < dist < col_tol * 2:
-                        col_tol = min(col_tol, dist * 0.45)
-
-        for x in all_x:
-            if not col_clusters:
-                col_clusters.append([x])
+        cur_row = 1
+        for b_idx, blk in enumerate(blocks):
+            btype = blk["type"]
+            if btype == "table" and blk.get("rows"):
+                if cur_row > 1:
+                    cur_row += 1
+                for r_offset, row_vals in enumerate(blk["rows"]):
+                    is_hdr = (r_offset == 0)
+                    for c_idx, val_str in enumerate(row_vals, start=1):
+                        parsed = parse_numeric(val_str)
+                        cell = ws.cell(row=cur_row, column=c_idx, value=parsed)
+                        cell.border = thin_border
+                        if is_hdr:
+                            cell.font = Font(bold=True)
+                            cell.fill = header_fill
+                    cur_row += 1
+                if b_idx < len(blocks) - 1:
+                    cur_row += 1
             else:
-                closest_idx = min(range(len(col_clusters)), key=lambda i: abs(sum(col_clusters[i])/len(col_clusters[i]) - x))
-                closest_avg = sum(col_clusters[closest_idx]) / len(col_clusters[closest_idx])
-                if abs(x - closest_avg) <= col_tol:
-                    col_clusters[closest_idx].append(x)
-                else:
-                    col_clusters.append([x])
-
-        sorted_cols = sorted([sum(c)/len(c) for c in col_clusters])
-
-        for r_idx, r in enumerate(rows, start=1):
-            is_header_row = (r_idx == 1)
-            row_cells = [""] * len(sorted_cols)
-            r.sort(key=lambda it: it['x_min'])
-
-            for it in r:
-                c_idx = min(range(len(sorted_cols)), key=lambda i: abs(sorted_cols[i] - it['x_center']))
-                if row_cells[c_idx]:
-                    row_cells[c_idx] += " " + it['text']
-                else:
-                    row_cells[c_idx] = it['text']
-
-            for c_idx, val_str in enumerate(row_cells, start=1):
-                parsed = parse_numeric(val_str)
-                cell = ws.cell(row=r_idx, column=c_idx, value=parsed)
+                txt_val = f"- {blk['text']}" if btype == "list_item" else blk.get("text", "")
+                if not txt_val:
+                    continue
+                cell = ws.cell(row=cur_row, column=1, value=txt_val)
                 cell.border = thin_border
-                if is_header_row:
-                    cell.font = Font(bold=True)
-                    cell.fill = header_fill
+                if btype == "heading":
+                    cell.font = Font(bold=True, size=12 if blk.get("level", 2) == 1 else 11)
+                cur_row += 1
 
-        for col in ws.columns:
-            max_len = 0
-            col_letter = get_column_letter(col[0].column)
-            for c in col:
-                if c.value is not None:
-                    max_len = max(max_len, len(str(c.value)))
-            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+        _auto_fit_xlsx_columns(ws, min_width=10, max_width=50)
+        del items, blocks
+        gc.collect()
 
     if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
         wb.remove(default_sheet)
@@ -5946,8 +6013,24 @@ def xlsx_to_pptx(xlsx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, in
         gc.collect()
 
 
+def _ocr_blocks_to_plain_lines(blocks: List[Dict[str, Any]], table_sep: str = "\t") -> List[str]:
+    """Formats structured OCR blocks into clean reading-order plain text lines."""
+    lines_out: List[str] = []
+    for blk in blocks:
+        btype = blk["type"]
+        if btype == "table" and blk.get("rows"):
+            for row in blk["rows"]:
+                lines_out.append(table_sep.join(str(c).strip() for c in row))
+        elif btype == "list_item" and blk.get("text"):
+            prefix = f"{blk.get('marker', '1.')} " if blk.get("ordered") else "- "
+            lines_out.append(f"{prefix}{blk['text']}")
+        elif blk.get("text"):
+            lines_out.append(blk["text"])
+    return lines_out
+
+
 def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple[bytes, str, str, int]:
-    """Places each image centered on a widescreen (16:9) presentation slide."""
+    """Places each EXIF-normalized, white-composited image centered on 16:9 slides with OCR speaker notes."""
     if not image_list:
         raise ValueError("No images provided.")
 
@@ -5958,17 +6041,19 @@ def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
 
     for filename, img_bytes in image_list:
         slide = prs.slides.add_slide(blank_layout)
-        with Image.open(io.BytesIO(img_bytes)) as pil_img:
-            img_w, img_h = pil_img.size
-            img_format = (pil_img.format or "").upper()
-            if img_format not in ("PNG", "JPEG", "JPG", "BMP", "GIF", "TIFF"):
-                png_buf = io.BytesIO()
-                pil_img.save(png_buf, format="PNG")
-                slide_img_bytes = png_buf.getvalue()
-            else:
-                slide_img_bytes = img_bytes
+        with Image.open(io.BytesIO(img_bytes)) as raw_im:
+            orig_fmt = (raw_im.format or "").upper()
+            has_alpha = raw_im.mode in ("RGBA", "LA") or (raw_im.mode == "P" and "transparency" in raw_im.info)
+        target_embed_fmt = "JPEG" if (orig_fmt == "JPEG" and not has_alpha) else "PNG"
+        slide_img_bytes, img_w, img_h = _normalize_image_bytes(
+            img_bytes,
+            flatten_alpha=True,
+            target_format=target_embed_fmt,
+            max_side=2400,
+            quality=95,
+        )
 
-        aspect = img_w / img_h
+        aspect = img_w / max(img_h, 1)
         max_w = Inches(12.0)
         max_h = Inches(6.5)
 
@@ -5982,6 +6067,18 @@ def images_to_pptx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
         left = (prs.slide_width - w) / 2
         top = (prs.slide_height - h) / 2
         slide.shapes.add_picture(io.BytesIO(slide_img_bytes), left, top, w, h)
+
+        # Populate Slide Speaker Notes with structured OCR text for searchability
+        items = extract_ocr_items(slide_img_bytes)
+        blocks = _structure_ocr_blocks(items)
+        if blocks:
+            notes_lines = _ocr_blocks_to_plain_lines(blocks, table_sep=" | ")
+            slide.notes_slide.notes_text_frame.text = "\n".join(notes_lines)
+        else:
+            slide.notes_slide.notes_text_frame.text = f"(No text detected on image: {filename})"
+
+        del slide_img_bytes, items, blocks
+        gc.collect()
 
     out_io = io.BytesIO()
     prs.save(out_io)
@@ -6103,7 +6200,7 @@ def pdf_to_pptx(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]
                 if blocks:
                     headings = [b["text"] for b in blocks if b["type"] == "heading"]
                     tables = [b["rows"] for b in blocks if b["type"] == "table"]
-                    paras = [b["text"] for b in blocks if b["type"] == "paragraph"]
+                    paras = [("- " + b["text"] if b["type"] == "list_item" else b["text"]) for b in blocks if b["type"] in ("paragraph", "list_item")]
 
                     title_txt = headings[0] if headings else f"Page {p_no} (Scanned)"
                     t_box = slide.shapes.add_textbox(margin_x, Inches(0.30), content_w, Inches(0.60))
@@ -6588,17 +6685,36 @@ def _pptx_to_txt(pptx_bytes: bytes) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
+def _images_to_txt(image_list: List[Tuple[str, bytes]], base_name: str) -> str:
+    """Extracts clean reading-order plain text with tab-delimited table rows across one or multiple images."""
+    chunks: List[str] = []
+    multi = len(image_list) > 1
+    for img_idx, (filename, img_bytes) in enumerate(image_list, start=1):
+        items = extract_ocr_items(img_bytes)
+        blocks = _structure_ocr_blocks(items)
+        if blocks:
+            lines_out = _ocr_blocks_to_plain_lines(blocks, table_sep="\t")
+            body_txt = "\n".join(lines_out)
+        else:
+            body_txt = f"(No text detected on image: {filename})"
+
+        if multi:
+            chunks.append(f"=== Image {img_idx}: {filename} ===\n{body_txt}")
+        else:
+            chunks.append(body_txt)
+
+        del items, blocks
+        gc.collect()
+
+    return "\n\n".join(chunks).strip() + "\n"
+
+
 def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Extracts clean plain text from any format (running OCR if input is an image)."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
 
     if input_fmt in ("png", "jpg", "webp"):
-        items = extract_ocr_items(data_bytes)
-        items.sort(key=lambda it: it['y_center'])
-        lines = []
-        for it in items:
-            lines.append(it['text'])
-        text = "\n".join(lines) if lines else "(No text detected on image)"
+        text = _images_to_txt([(f"{base_name}.{input_fmt}", data_bytes)], base_name)
 
     elif input_fmt == "pdf":
         doc = fitz.open(stream=data_bytes, filetype="pdf")
@@ -6614,6 +6730,8 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
                             if blk["type"] == "table" and blk.get("rows"):
                                 for row in blk["rows"]:
                                     lines_out.append("\t".join(str(c).strip() for c in row))
+                            elif blk["type"] == "list_item" and blk.get("text"):
+                                lines_out.append(f"- {blk['text']}")
                             elif blk.get("text"):
                                 lines_out.append(blk["text"])
                         page_txt = "\n".join(lines_out)
@@ -6897,6 +7015,8 @@ def pdf_to_md(pdf_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
                     if blk["type"] == "heading":
                         prefix = "#" if blk.get("level", 2) == 1 else "##"
                         md_parts.append(f"{prefix} {blk['text']}\n")
+                    elif blk["type"] == "list_item":
+                        md_parts.append(f"- {blk['text']}\n")
                     elif blk["type"] == "paragraph":
                         md_parts.append(f"{blk['text']}\n")
                     elif blk["type"] == "table" and blk.get("rows"):
@@ -7265,14 +7385,56 @@ def _pptx_to_md(pptx_bytes: bytes) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
+def _images_to_md(image_list: List[Tuple[str, bytes]], base_name: str) -> str:
+    """Converts one or multiple images to structured Markdown with headings, lists, and GFM tables."""
+    parts: List[str] = []
+    multi = len(image_list) > 1
+    for img_idx, (filename, img_bytes) in enumerate(image_list, start=1):
+        if multi:
+            if img_idx > 1:
+                parts.append("---\n")
+            parts.append(f"## Image {img_idx}: {filename}\n")
+
+        items = extract_ocr_items(img_bytes)
+        blocks = _structure_ocr_blocks(items)
+        if not blocks:
+            parts.append(f"*(No text detected on image: {filename})*\n")
+        else:
+            in_list = False
+            for blk in blocks:
+                btype = blk["type"]
+                if btype == "list_item":
+                    prefix = f"{blk.get('marker', '1.')} " if blk.get("ordered") else "- "
+                    parts.append(f"{prefix}{blk['text']}")
+                    in_list = True
+                else:
+                    if in_list:
+                        parts.append("")
+                        in_list = False
+                    if btype == "heading":
+                        lvl = blk.get("level", 2)
+                        if multi:
+                            lvl = min(lvl + 1, 3)
+                        parts.append(f"{'#' * lvl} {blk['text']}\n")
+                    elif btype == "paragraph":
+                        parts.append(f"{blk['text']}\n")
+                    elif btype == "table" and blk.get("rows"):
+                        parts.append(_format_md_table(blk["rows"]) + "\n")
+            if in_list:
+                parts.append("")
+
+        del items, blocks
+        gc.collect()
+
+    return "\n".join(parts).strip() + "\n"
+
+
 def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates structured Markdown from any document."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
 
     if input_fmt in ("png", "jpg", "webp"):
-        items = extract_ocr_items(data_bytes)
-        items.sort(key=lambda it: it['y_center'])
-        md_text = f"# OCR Extracted Content: {base_name}\n\n" + "\n\n".join(it['text'] for it in items)
+        md_text = _images_to_md([(f"{base_name}.{input_fmt}", data_bytes)], base_name)
 
     elif input_fmt == "docx":
         md_text = _docx_to_md(data_bytes)
@@ -7841,24 +8003,108 @@ def _pptx_to_html_body(pptx_bytes: bytes) -> str:
     return "\n".join(parts)
 
 
-def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Generates a clean responsive HTML5 document from any file format."""
-    norm_fmt = input_fmt.lower().replace("jpeg", "jpg")
-    if norm_fmt == "docx":
-        body_html = _docx_to_html_body(data_bytes)
-    elif norm_fmt == "xlsx":
-        body_html = _xlsx_to_html_body(data_bytes)
-    elif norm_fmt == "pptx":
-        body_html = _pptx_to_html_body(data_bytes)
-    else:
-        md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
-        body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
+def _images_to_html_body(image_list: List[Tuple[str, bytes]]) -> str:
+    """Builds styled HTML5 cards with EXIF-corrected, white-composited previews and structured OCR layout."""
+    parts: List[str] = []
+    multi = len(image_list) > 1
+    if multi:
+        nav_pills = [
+            f'<a class="sheet-pill" href="#img-{idx}">Image {idx}: {html.escape(Path(fn).name)}</a>'
+            for idx, (fn, _) in enumerate(image_list, start=1)
+        ]
+        parts.append(f'<nav class="sheet-nav">{"".join(nav_pills)}</nav>')
 
+    for img_idx, (filename, img_bytes) in enumerate(image_list, start=1):
+        with Image.open(io.BytesIO(img_bytes)) as raw_im:
+            orig_fmt = (raw_im.format or "").upper()
+            has_alpha = raw_im.mode in ("RGBA", "LA") or (raw_im.mode == "P" and "transparency" in raw_im.info)
+        embed_fmt = "JPEG" if (orig_fmt == "JPEG" and not has_alpha) else "PNG"
+        embed_mime = "image/jpeg" if embed_fmt == "JPEG" else "image/png"
+        preview_bytes, _, _ = _normalize_image_bytes(
+            img_bytes,
+            flatten_alpha=True,
+            target_format=embed_fmt,
+            max_side=1200,
+            quality=90,
+        )
+        b64_img = base64.b64encode(preview_bytes).decode("ascii")
+        del preview_bytes
+
+        items = extract_ocr_items(img_bytes)
+        blocks = _structure_ocr_blocks(items)
+
+        parts.append(f'<section class="pptx-slide" id="img-{img_idx}">')
+        if multi:
+            parts.append(f'<div class="slide-kicker">Image {img_idx} of {len(image_list)} — {html.escape(filename)}</div>')
+        parts.append(
+            f'<figure class="doc-figure align-center">'
+            f'<img src="data:{embed_mime};base64,{b64_img}" alt="{html.escape(filename)}" '
+            f'style="max-width:100%;max-height:540px;border:1px solid #cbd5e1;"></figure>'
+        )
+
+        if not blocks:
+            parts.append(f'<p class="sheet-empty"><em>(No text detected on image: {html.escape(filename)})</em></p>')
+        else:
+            list_tag: Optional[str] = None
+
+            def close_list():
+                nonlocal list_tag
+                if list_tag:
+                    parts.append(f"</{list_tag}>")
+                    list_tag = None
+
+            for blk in blocks:
+                btype = blk["type"]
+                if btype == "list_item":
+                    tag = "ol" if blk.get("ordered") else "ul"
+                    if list_tag != tag:
+                        close_list()
+                        parts.append(f"<{tag}>")
+                        list_tag = tag
+                    parts.append(f"<li>{html.escape(blk['text'])}</li>")
+                else:
+                    close_list()
+                    if btype == "heading":
+                        lvl = blk.get("level", 2)
+                        if multi:
+                            lvl = min(lvl + 1, 3)
+                        parts.append(f"<h{lvl}>{html.escape(blk['text'])}</h{lvl}>")
+                    elif btype == "paragraph":
+                        parts.append(f"<p>{html.escape(blk['text'])}</p>")
+                    elif btype == "table" and blk.get("rows"):
+                        rows = blk["rows"]
+                        hdr_cells = "".join(
+                            f'<th style="background:#f1f5f9;color:#0f172a;">{html.escape(str(c))}</th>'
+                            for c in rows[0]
+                        )
+                        body_trs = []
+                        for r in rows[1:]:
+                            tds = "".join(f"<td>{html.escape(str(c))}</td>" for c in r)
+                            body_trs.append(f"<tr>{tds}</tr>")
+                        parts.append(
+                            '<div class="table-wrap"><table>'
+                            f"<thead><tr>{hdr_cells}</tr></thead>"
+                            f'<tbody>{"".join(body_trs)}</tbody>'
+                            "</table></div>"
+                        )
+            close_list()
+
+        parts.append("</section>")
+        if img_idx < len(image_list):
+            parts.append('<hr class="page-break">')
+
+        del items, blocks
+        gc.collect()
+
+    return "\n".join(parts)
+
+
+def _wrap_html_document(title: str, body_html: str) -> bytes:
     full_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>{html.escape(base_name)}</title>
+  <title>{html.escape(title)}</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "DejaVu Sans", sans-serif; line-height: 1.6; max-width: 1120px; margin: 36px auto; padding: 0 24px; color: #1e293b; background: #ffffff; }}
     h1, h2, h3, h4 {{ color: #0f172a; margin-top: 1.4em; }}
@@ -7898,7 +8144,25 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
 {body_html}
 </body>
 </html>"""
-    return full_html.encode("utf-8"), "text/html; charset=utf-8", f"{base_name}.html", 1
+    return full_html.encode("utf-8")
+
+
+def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
+    """Generates a clean responsive HTML5 document from any file format."""
+    norm_fmt = input_fmt.lower().replace("jpeg", "jpg")
+    if norm_fmt in ("png", "jpg", "webp"):
+        body_html = _images_to_html_body([(f"{base_name}.{norm_fmt}", data_bytes)])
+    elif norm_fmt == "docx":
+        body_html = _docx_to_html_body(data_bytes)
+    elif norm_fmt == "xlsx":
+        body_html = _xlsx_to_html_body(data_bytes)
+    elif norm_fmt == "pptx":
+        body_html = _pptx_to_html_body(data_bytes)
+    else:
+        md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
+        body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
+
+    return _wrap_html_document(base_name, body_html), "text/html; charset=utf-8", f"{base_name}.html", 1
 
 
 # --- Universal Hub-and-Spoke Dispatcher ---
@@ -7953,11 +8217,14 @@ def universal_convert(
             xlsx_data, _, _, _ = images_to_xlsx(input_files, base_name)
             return xlsx_to_csv(xlsx_data, base_name)
         elif target == "txt":
-            return any_to_txt(primary_bytes, source_ext, base_name)
+            txt_str = _images_to_txt(input_files, base_name)
+            return txt_str.encode("utf-8"), "text/plain; charset=utf-8", f"{base_name}.txt", len(input_files)
         elif target == "md":
-            return any_to_md(primary_bytes, source_ext, base_name)
+            md_str = _images_to_md(input_files, base_name)
+            return md_str.encode("utf-8"), "text/markdown; charset=utf-8", f"{base_name}.md", len(input_files)
         elif target == "html":
-            return any_to_html(primary_bytes, source_ext, base_name)
+            body_html = _images_to_html_body(input_files)
+            return _wrap_html_document(base_name, body_html), "text/html; charset=utf-8", f"{base_name}.html", len(input_files)
 
     # 2. PDF Source
     elif source_ext == "pdf":
