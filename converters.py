@@ -43,7 +43,9 @@ from docx.text.paragraph import Paragraph
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import MSO_ANCHOR
+from pptx.enum.dml import MSO_COLOR_TYPE
+from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 
 import markdown
 from bs4 import BeautifulSoup
@@ -53,6 +55,7 @@ from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as rl_canvas
@@ -2704,6 +2707,7 @@ def _segments_to_rl_markup(
     preserve_newlines: bool = False,
     default_color: Optional[str] = None,
     strip_edges: bool = True,
+    base_font_size: Optional[float] = None,
 ) -> str:
     """Converts extracted paragraph segments into ReportLab XML markup with links and inline formatting."""
     parts: List[str] = []
@@ -2719,6 +2723,7 @@ def _segments_to_rl_markup(
             and merged[-1].get("url") == seg.get("url")
             and merged[-1].get("bold") == seg.get("bold")
             and merged[-1].get("italic") == seg.get("italic")
+            and merged[-1].get("size") == seg.get("size")
         ):
             merged[-1]["text"] += txt
         else:
@@ -2733,6 +2738,8 @@ def _segments_to_rl_markup(
 
         if seg.get("mono"):
             txt = f'<font name="{mono_family}">{txt}</font>'
+        if base_font_size is not None and seg.get("size") and abs(float(seg["size"]) - base_font_size) >= 0.8:
+            txt = f'<font size="{float(seg["size"]):.1f}">{txt}</font>'
         if seg.get("bold"):
             txt = f"<b>{txt}</b>"
         if seg.get("italic"):
@@ -3661,139 +3668,1523 @@ def images_to_xlsx(image_list: List[Tuple[str, bytes]], base_name: str) -> Tuple
     return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", output_filename, len(image_list)
 
 
-# --- PowerPoint (.pptx) Converters ---
+# --- PowerPoint (.pptx) Shared Extraction Model & Converters ---
 
-def _extract_slide_title(slide, default_title: str) -> Tuple[str, Any, bool]:
+_PPTX_NS_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_PPTX_NS_P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_PPTX_NS_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+_DEFAULT_PPTX_THEME = {
+    "dk1": "000000",
+    "lt1": "FFFFFF",
+    "dk2": "1F497D",
+    "lt2": "EEECE1",
+    "accent1": "4F81BD",
+    "accent2": "C0504D",
+    "accent3": "9BBB59",
+    "accent4": "8064A2",
+    "accent5": "4BACC6",
+    "accent6": "F79646",
+    "hlink": "0000FF",
+    "folhlink": "800080",
+    "tx1": "000000",
+    "bg1": "FFFFFF",
+    "tx2": "1F497D",
+    "bg2": "EEECE1",
+}
+
+
+def _extract_pptx_theme_colors(prs: Presentation) -> Dict[str, str]:
+    """Extracts the presentation's theme color scheme and clrMap aliases."""
+    colors_map = dict(_DEFAULT_PPTX_THEME)
+    try:
+        if not prs.slide_masters:
+            return colors_map
+        master = prs.slide_masters[0]
+        # Read clrScheme from master's theme relationship
+        for rel in master.part.rels.values():
+            if "theme" in (rel.reltype or "").lower():
+                theme_el = parse_xml(rel.target_part.blob)
+                clr_scheme = theme_el.find(f".//{_PPTX_NS_A}clrScheme")
+                if clr_scheme is not None:
+                    for child in clr_scheme:
+                        key = child.tag.split("}")[-1].lower()
+                        srgb = child.find(f"{_PPTX_NS_A}srgbClr")
+                        sys_clr = child.find(f"{_PPTX_NS_A}sysClr")
+                        val = None
+                        if srgb is not None:
+                            val = (srgb.get("val") or "").upper()
+                        elif sys_clr is not None:
+                            val = (sys_clr.get("lastClr") or sys_clr.get("val") or "").upper()
+                        if val and re.match(r"^[0-9A-F]{6}$", val):
+                            colors_map[key] = val
+                break
+
+        clr_map = master._element.find(f"{_PPTX_NS_P}clrMap")
+        if clr_map is not None:
+            for alias in ("bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink"):
+                target = clr_map.get(alias)
+                if target and target.lower() in colors_map:
+                    colors_map[alias.lower()] = colors_map[target.lower()]
+    except Exception:
+        pass
+    return colors_map
+
+
+def _apply_pptx_xml_color_mods(hex_rgb: str, color_el) -> str:
+    """Applies DrawingML tint/shade/lumMod/lumOff color modifiers to a 6-char hex RGB."""
+    if color_el is None or not re.match(r"^[0-9A-F]{6}$", hex_rgb):
+        return hex_rgb
+    r, g, b = int(hex_rgb[0:2], 16) / 255.0, int(hex_rgb[2:4], 16) / 255.0, int(hex_rgb[4:6], 16) / 255.0
+
+    def _pct(tag: str) -> Optional[float]:
+        el = color_el.find(f"{_PPTX_NS_A}{tag}")
+        if el is None:
+            return None
+        try:
+            return int(el.get("val", "0")) / 100000.0
+        except Exception:
+            return None
+
+    tint = _pct("tint")
+    shade = _pct("shade")
+    lum_mod = _pct("lumMod")
+    lum_off = _pct("lumOff")
+
+    if tint is not None:
+        r = r * tint + (1.0 - tint)
+        g = g * tint + (1.0 - tint)
+        b = b * tint + (1.0 - tint)
+    if shade is not None:
+        r *= shade
+        g *= shade
+        b *= shade
+    if lum_mod is not None or lum_off is not None:
+        import colorsys
+        h_c, l_c, s_c = colorsys.rgb_to_hls(r, g, b)
+        if lum_mod is not None:
+            l_c *= lum_mod
+        if lum_off is not None:
+            l_c += lum_off
+        l_c = max(0.0, min(1.0, l_c))
+        r, g, b = colorsys.hls_to_rgb(h_c, l_c, s_c)
+
+    ri = max(0, min(255, int(round(r * 255))))
+    gi = max(0, min(255, int(round(g * 255))))
+    bi = max(0, min(255, int(round(b * 255))))
+    return f"{ri:02X}{gi:02X}{bi:02X}"
+
+
+def _resolve_pptx_color_hex(color_fmt, theme_colors: Dict[str, str], solid_fill_el=None) -> Optional[str]:
+    """Resolves a python-pptx ColorFormat or DrawingML <a:solidFill> element to a 6-char RGB hex string."""
+    if solid_fill_el is not None:
+        srgb = solid_fill_el.find(f"{_PPTX_NS_A}srgbClr")
+        if srgb is not None:
+            val = (srgb.get("val") or "").strip().upper()
+            if re.match(r"^[0-9A-F]{6}$", val):
+                return _apply_pptx_xml_color_mods(val, srgb)
+        sch = solid_fill_el.find(f"{_PPTX_NS_A}schemeClr")
+        if sch is not None:
+            sval = (sch.get("val") or "").strip().lower()
+            base = theme_colors.get(sval)
+            if base:
+                return _apply_pptx_xml_color_mods(base, sch)
+
+    if color_fmt is None:
+        return None
+    try:
+        ctype = color_fmt.type
+        if ctype == MSO_COLOR_TYPE.RGB and color_fmt.rgb is not None:
+            hx = str(color_fmt.rgb).upper()
+            return hx if re.match(r"^[0-9A-F]{6}$", hx) else None
+        if ctype == MSO_COLOR_TYPE.SCHEME:
+            tname = str(color_fmt.theme_color).split(".")[-1].lower()
+            alias_map = {
+                "dark_1": "dk1", "light_1": "lt1", "dark_2": "dk2", "light_2": "lt2",
+                "text_1": "tx1", "background_1": "bg1", "text_2": "tx2", "background_2": "bg2",
+                "accent_1": "accent1", "accent_2": "accent2", "accent_3": "accent3",
+                "accent_4": "accent4", "accent_5": "accent5", "accent_6": "accent6",
+                "hyperlink": "hlink", "followed_hyperlink": "folhlink",
+            }
+            key = alias_map.get(tname, tname)
+            base = theme_colors.get(key)
+            if base:
+                br = float(getattr(color_fmt, "brightness", 0.0) or 0.0)
+                return _apply_excel_tint(base, br) if br else base
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_pptx_fill_hex(fill_obj, theme_colors: Dict[str, str], slide_bg_hex: Optional[str] = None) -> Optional[str]:
+    """Resolves solid/gradient/background fill from a PPTX FillFormat."""
+    if fill_obj is None:
+        return None
+    try:
+        ftype = fill_obj.type
+        if ftype == 1:  # SOLID
+            return _resolve_pptx_color_hex(fill_obj.fore_color, theme_colors)
+        if ftype == 3:  # GRADIENT
+            stops = getattr(fill_obj, "gradient_stops", None)
+            if stops:
+                return _resolve_pptx_color_hex(stops[0].color, theme_colors)
+        if ftype == 5:  # BACKGROUND (transparent over underlying canvas/cards)
+            return None
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_slide_bg_hex(slide, theme_colors: Dict[str, str]) -> str:
+    """Resolves the effective background fill color of a slide (checking slide -> layout -> master)."""
+    for container in (slide, getattr(slide, "slide_layout", None), getattr(slide, "slide_master", None)):
+        if container is None:
+            continue
+        try:
+            bg = container.background
+            if bg is not None and bg.fill is not None:
+                ftype = bg.fill.type
+                if ftype == 1:
+                    hx = _resolve_pptx_color_hex(bg.fill.fore_color, theme_colors)
+                    if hx:
+                        return hx
+                elif ftype == 3 and bg.fill.gradient_stops:
+                    hx = _resolve_pptx_color_hex(bg.fill.gradient_stops[0].color, theme_colors)
+                    if hx:
+                        return hx
+        except Exception:
+            pass
+    return "FFFFFF"
+
+
+def _format_pptx_autonum(num_type: str, n: int) -> str:
+    """Formats DrawingML buAutoNum numbers (arabicPeriod, alphaLcPeriod, romanLcPeriod, etc.)."""
+    nt = (num_type or "arabicPeriod").lower()
+    if "alphalc" in nt:
+        return f"{chr(ord('a') + ((n - 1) % 26))}."
+    if "alphauc" in nt:
+        return f"{chr(ord('A') + ((n - 1) % 26))}."
+    if "romanlc" in nt:
+        vals = [(10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")]
+        rem = n
+        res = []
+        for v, sym in vals:
+            while rem >= v:
+                res.append(sym)
+                rem -= v
+        return f"{''.join(res) or str(n)}."
+    if "parenr" in nt:
+        return f"{n})"
+    return f"{n}."
+
+
+def _extract_pptx_text_frame(
+    tf,
+    part_rels,
+    theme_colors: Dict[str, str],
+    default_fg_hex: str,
+    is_placeholder: bool = False,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Extracts ordered paragraphs, inline styled runs, hyperlinks, bullets/numbers, and code-block flag."""
+    tx_body = tf._txBody
+    lst_style = tx_body.find(f"{_PPTX_NS_A}lstStyle")
+    level_defaults: Dict[int, Dict[str, Any]] = {}
+    if lst_style is not None:
+        for lvl_idx in range(9):
+            lvl_el = lst_style.find(f"{_PPTX_NS_A}lvl{lvl_idx + 1}pPr")
+            if lvl_el is not None:
+                d_rpr = lvl_el.find(f"{_PPTX_NS_A}defRPr")
+                sz = None
+                col = None
+                if d_rpr is not None:
+                    if d_rpr.get("sz") and d_rpr.get("sz").isdigit():
+                        sz = int(d_rpr.get("sz")) / 100.0
+                    sf = d_rpr.find(f"{_PPTX_NS_A}solidFill")
+                    if sf is not None:
+                        col = _resolve_pptx_color_hex(None, theme_colors, sf)
+                level_defaults[lvl_idx] = {"size": sz, "color": col}
+
+    paragraphs_out: List[Dict[str, Any]] = []
+    ord_counters: Dict[int, int] = {}
+    mono_chars = 0
+    total_chars = 0
+
+    for p_el in tx_body.findall(f"{_PPTX_NS_A}p"):
+        pPr = p_el.find(f"{_PPTX_NS_A}pPr")
+        lvl = 0
+        align_val = TA_LEFT
+        list_info: Optional[Dict[str, Any]] = None
+        def_rpr = None
+        space_after_pt = 3.0
+        space_before_pt = 0.0
+
+        if pPr is not None:
+            try:
+                lvl = max(0, min(8, int(pPr.get("lvl", "0"))))
+            except Exception:
+                lvl = 0
+            algn = (pPr.get("algn") or "").lower()
+            if algn == "ctr":
+                align_val = TA_CENTER
+            elif algn == "r":
+                align_val = TA_RIGHT
+            elif algn == "just":
+                align_val = TA_JUSTIFY
+
+            spc_a = pPr.find(f"{_PPTX_NS_A}spcAft/{_PPTX_NS_A}spcPts")
+            if spc_a is not None and (spc_a.get("val") or "").isdigit():
+                space_after_pt = int(spc_a.get("val")) / 100.0
+            spc_b = pPr.find(f"{_PPTX_NS_A}spcBef/{_PPTX_NS_A}spcPts")
+            if spc_b is not None and (spc_b.get("val") or "").isdigit():
+                space_before_pt = int(spc_b.get("val")) / 100.0
+
+            def_rpr = pPr.find(f"{_PPTX_NS_A}defRPr")
+
+            has_bu_none = pPr.find(f"{_PPTX_NS_A}buNone") is not None
+            bu_auto = pPr.find(f"{_PPTX_NS_A}buAutoNum")
+            bu_char = pPr.find(f"{_PPTX_NS_A}buChar")
+            if not has_bu_none:
+                if bu_auto is not None:
+                    num_type = bu_auto.get("type", "arabicPeriod")
+                    start_at = 1
+                    try:
+                        start_at = int(bu_auto.get("startAt", "1"))
+                    except Exception:
+                        start_at = 1
+                    for k in [k for k in ord_counters if k > lvl]:
+                        del ord_counters[k]
+                    if lvl not in ord_counters:
+                        ord_counters[lvl] = start_at
+                    else:
+                        ord_counters[lvl] += 1
+                    num_val = ord_counters[lvl]
+                    list_info = {
+                        "ordered": True,
+                        "level": lvl,
+                        "prefix": _format_pptx_autonum(num_type, num_val) + " ",
+                        "num": num_val,
+                    }
+                elif bu_char is not None:
+                    ch = bu_char.get("char", "•")
+                    if ord(ch[0]) > 0xF000 or ch in ("n", "q", "v", "l", "Ø"):
+                        ch = ["•", "◦", "▪"][min(lvl, 2)]
+                    list_info = {"ordered": False, "level": lvl, "prefix": f"{ch} "}
+                elif lvl > 0:
+                    ch = ["•", "◦", "▪"][min(lvl, 2)]
+                    list_info = {"ordered": False, "level": lvl, "prefix": f"{ch} "}
+
+        if list_info is None:
+            ord_counters.clear()
+
+        def_sz = level_defaults.get(lvl, {}).get("size") or 13.0
+        def_col = level_defaults.get(lvl, {}).get("color") or default_fg_hex
+        def_bold = False
+        def_italic = False
+        if def_rpr is not None:
+            if def_rpr.get("sz") and def_rpr.get("sz").isdigit():
+                def_sz = int(def_rpr.get("sz")) / 100.0
+            if def_rpr.get("b") in ("1", "true"):
+                def_bold = True
+            if def_rpr.get("i") in ("1", "true"):
+                def_italic = True
+            sf = def_rpr.find(f"{_PPTX_NS_A}solidFill")
+            if sf is not None:
+                c_res = _resolve_pptx_color_hex(None, theme_colors, sf)
+                if c_res:
+                    def_col = c_res
+
+        segments: List[Dict[str, Any]] = []
+        p_max_pt = def_sz
+
+        def _parse_run_xml(r_el, override_text: Optional[str] = None):
+            nonlocal mono_chars, total_chars, p_max_pt
+            t_el = r_el.find(f"{_PPTX_NS_A}t")
+            txt = override_text if override_text is not None else ((t_el.text or "") if t_el is not None else "")
+            if not txt:
+                return
+            rPr = r_el.find(f"{_PPTX_NS_A}rPr")
+            bold = def_bold
+            italic = def_italic
+            underline = False
+            sz_pt = def_sz
+            col_hex = def_col
+            font_name = ""
+            url = None
+
+            if rPr is not None:
+                if rPr.get("b") is not None:
+                    bold = rPr.get("b") not in ("0", "false")
+                if rPr.get("i") is not None:
+                    italic = rPr.get("i") not in ("0", "false")
+                if rPr.get("u") is not None and rPr.get("u") != "none":
+                    underline = True
+                if rPr.get("sz") and rPr.get("sz").isdigit():
+                    sz_pt = int(rPr.get("sz")) / 100.0
+
+                sf = rPr.find(f"{_PPTX_NS_A}solidFill")
+                if sf is not None:
+                    c_res = _resolve_pptx_color_hex(None, theme_colors, sf)
+                    if c_res:
+                        col_hex = c_res
+
+                for f_tag in ("latin", "cs", "ea"):
+                    f_el = rPr.find(f"{_PPTX_NS_A}{f_tag}")
+                    if f_el is not None and f_el.get("typeface"):
+                        font_name = f_el.get("typeface")
+                        break
+
+                hlink = rPr.find(f"{_PPTX_NS_A}hlinkClick")
+                if hlink is not None:
+                    rid = hlink.get(f"{_PPTX_NS_R}id")
+                    if rid and part_rels and rid in part_rels:
+                        url = part_rels[rid].target_ref
+                    if url and not underline:
+                        underline = True
+                    if url and sf is None:
+                        col_hex = "93C5FD" if _is_dark_hex(default_fg_hex) is False and default_fg_hex == "FFFFFF" else "2563EB"
+
+            is_mono = _is_mono_font(font_name)
+            n_ns = len(txt.strip())
+            total_chars += n_ns
+            if is_mono:
+                mono_chars += n_ns
+            p_max_pt = max(p_max_pt, sz_pt)
+            segments.append({
+                "text": txt,
+                "url": url,
+                "bold": bold,
+                "italic": italic,
+                "underline": underline,
+                "color": col_hex,
+                "mono": is_mono,
+                "size": sz_pt,
+            })
+
+        for ch in p_el:
+            tag = ch.tag
+            if tag == f"{_PPTX_NS_A}r":
+                _parse_run_xml(ch)
+            elif tag == f"{_PPTX_NS_A}fld":
+                _parse_run_xml(ch)
+            elif tag == f"{_PPTX_NS_A}br":
+                segments.append({
+                    "text": "\n",
+                    "url": None,
+                    "bold": False,
+                    "italic": False,
+                    "underline": False,
+                    "color": def_col,
+                    "mono": False,
+                    "size": def_sz,
+                })
+
+        plain = "".join(s["text"] for s in segments)
+        paragraphs_out.append({
+            "segments": segments,
+            "plain_text": plain,
+            "level": lvl,
+            "align": align_val,
+            "list_info": list_info,
+            "size_pt": p_max_pt,
+            "space_before": space_before_pt,
+            "space_after": space_after_pt,
+        })
+
+    non_empty_count = sum(1 for p in paragraphs_out if p["plain_text"].strip())
+    all_plain = "\n".join(p["plain_text"] for p in paragraphs_out)
+    is_mono_block = (
+        total_chars > 0
+        and (mono_chars / total_chars) >= 0.75
+        and (non_empty_count >= 2 or "\n" in all_plain)
+    )
+    return paragraphs_out, is_mono_block
+
+
+def _extract_pptx_table_data(
+    tbl_shape,
+    part_rels,
+    theme_colors: Dict[str, str],
+    slide_bg_hex: str,
+) -> Dict[str, Any]:
+    """Extracts a PPTX table preserving merged cells (gridSpan/rowSpan), cell shading, contrast colors, and hyperlinks."""
+    tbl = tbl_shape.table
+    n_r = len(tbl.rows)
+    n_c = len(tbl.columns)
+    col_widths_pt = [max((c.width or 914400) / 12700.0, 12.0) for c in tbl.columns]
+    row_heights_pt = [max((r.height or 228600) / 12700.0, 14.0) for r in tbl.rows]
+
+    tbl_pr = tbl._tbl.find(f"{_PPTX_NS_A}tblPr")
+    has_first_row_hdr = tbl_pr is not None and tbl_pr.get("firstRow") == "1"
+
+    raw_rows: List[List[Dict[str, Any]]] = []
+    span_cmds: List[Tuple[int, int, int, int]] = []
+
+    for r_i in range(n_r):
+        row_cells: List[Dict[str, Any]] = []
+        for c_i in range(n_c):
+            cell = tbl.cell(r_i, c_i)
+            is_spanned = bool(getattr(cell, "is_spanned", False))
+            is_origin = not is_spanned
+            c_span = max(1, int(getattr(cell, "span_width", 1))) if getattr(cell, "is_merge_origin", False) else 1
+            r_span = max(1, int(getattr(cell, "span_height", 1))) if getattr(cell, "is_merge_origin", False) else 1
+            if is_origin and (c_span > 1 or r_span > 1):
+                span_cmds.append((c_i, r_i, min(n_c - 1, c_i + c_span - 1), min(n_r - 1, r_i + r_span - 1)))
+
+            fill_hex = _resolve_pptx_fill_hex(cell.fill, theme_colors, slide_bg_hex)
+            if not fill_hex:
+                if r_i == 0 and has_first_row_hdr:
+                    fill_hex = "1E3A8A"
+                else:
+                    fill_hex = "F8FAFC" if r_i % 2 == 1 else "FFFFFF"
+
+            dark_cell = _is_dark_hex(fill_hex)
+            def_fg = "FFFFFF" if dark_cell else "0F172A"
+            paras, _ = _extract_pptx_text_frame(cell.text_frame, part_rels, theme_colors, def_fg)
+
+            # Guarantee legible contrast if source text inherited dark color on dark cell fill
+            for p in paras:
+                for seg in p["segments"]:
+                    if dark_cell and seg["color"] in (None, "000000", "0F172A", "1E293B", "334155"):
+                        seg["color"] = "FFFFFF"
+
+            row_cells.append({
+                "is_origin": is_origin,
+                "col_span": c_span,
+                "row_span": r_span,
+                "fill": fill_hex,
+                "paras": paras,
+                "plain_text": "\n".join(p["plain_text"].strip() for p in paras if p["plain_text"].strip()).strip(),
+            })
+        raw_rows.append(row_cells)
+
+    return {
+        "col_widths_pt": col_widths_pt,
+        "row_heights_pt": row_heights_pt,
+        "raw_rows": raw_rows,
+        "span_cmds": span_cmds,
+        "repeat_hdr_rows": 1 if (n_r > 1 and (has_first_row_hdr or len(span_cmds) > 0)) else 1,
+    }
+
+
+def _extract_pptx_deck_model(pptx_bytes: bytes) -> Dict[str, Any]:
     """
-    Extracts the most appropriate title for a slide.
-    Checks slide.shapes.title first; if not found or empty, searches for the topmost text shape.
-    Returns: (title_text, title_shape, skip_first_paragraph_only)
+    Parses a PPTX presentation into a rich slide-by-slide structural model.
+    Recursively flattens GroupShapes with exact world coordinates, resolves theme/RGB fills,
+    extracts bullets/numbering/inline styling/hyperlinks/code blocks, merged tables, images, and speaker notes.
     """
-    if slide.shapes.title and slide.shapes.title.has_text_frame and slide.shapes.title.text_frame.text.strip():
-        return slide.shapes.title.text_frame.text.strip(), slide.shapes.title, False
-
-    text_shapes = [s for s in slide.shapes if s.has_text_frame and s.text_frame.text.strip()]
-    if text_shapes:
-        text_shapes.sort(key=lambda s: getattr(s, 'top', 0))
-        top_s = text_shapes[0]
-        non_empty_paras = [p for p in top_s.text_frame.paragraphs if p.text.strip()]
-        if non_empty_paras:
-            candidate = non_empty_paras[0].text.strip()
-            if len(candidate) < 150:
-                return candidate, top_s, (len(non_empty_paras) > 1)
-    return default_title, None, False
-
-
-def pptx_to_docx(pptx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Converts PowerPoint slides into an editable Word document with headings, bullets, and tables."""
     prs = Presentation(io.BytesIO(pptx_bytes))
-    doc = Document()
-    slide_count = len(prs.slides)
+    slide_w_pt = (prs.slide_width or Inches(13.333)) / 12700.0
+    slide_h_pt = (prs.slide_height or Inches(7.5)) / 12700.0
+    theme_colors = _extract_pptx_theme_colors(prs)
 
-    for idx, slide in enumerate(prs.slides, start=1):
-        title_text, title_shape, skip_first_p = _extract_slide_title(slide, f"Slide {idx}")
-        doc.add_heading(title_text, level=1)
+    slides_out: List[Dict[str, Any]] = []
 
-        for shape in slide.shapes:
-            if shape == title_shape and not skip_first_p:
-                continue
-            if shape.has_text_frame:
-                paragraphs = shape.text_frame.paragraphs
-                if shape == title_shape and skip_first_p:
-                    paragraphs = paragraphs[1:]
-                for p in paragraphs:
-                    t = p.text.strip()
-                    if t:
-                        doc.add_paragraph(t, style='List Bullet' if p.level > 0 else 'Normal')
-            elif shape.has_table:
-                tbl = shape.table
-                doc_tbl = doc.add_table(rows=len(tbl.rows), cols=len(tbl.columns))
-                doc_tbl.style = 'Table Grid'
-                for r_i, row in enumerate(tbl.rows):
-                    for c_i, cell in enumerate(row.cells):
-                        cell_p = doc_tbl.cell(r_i, c_i).paragraphs[0]
-                        cell_p.text = cell.text.strip()
-                        if r_i == 0 and cell_p.runs:
-                            cell_p.runs[0].bold = True
-                doc.add_paragraph()
+    for s_idx, slide in enumerate(prs.slides, start=1):
+        slide_bg_hex = _resolve_slide_bg_hex(slide, theme_colors)
+        slide_dark = _is_dark_hex(slide_bg_hex)
+        part_rels = slide.part.rels
+        items: List[Dict[str, Any]] = []
 
-        doc.add_paragraph()
+        def _walk_shapes(shapes, ox_emu: float, oy_emu: float, sx: float, sy: float, in_group: bool):
+            for shp in shapes:
+                lx = float(getattr(shp, "left", 0) or 0)
+                ly = float(getattr(shp, "top", 0) or 0)
+                lw = float(getattr(shp, "width", 0) or 0)
+                lh = float(getattr(shp, "height", 0) or 0)
 
-    out_io = io.BytesIO()
-    doc.save(out_io)
-    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", slide_count
+                wx_emu = ox_emu + lx * sx
+                wy_emu = oy_emu + ly * sy
+                ww_emu = lw * sx
+                wh_emu = lh * sy
+
+                if shp.shape_type == MSO_SHAPE_TYPE.GROUP:
+                    grp_el = shp._element
+                    xfrm = grp_el.find(f"{_PPTX_NS_P}grpSpPr/{_PPTX_NS_A}xfrm")
+                    if xfrm is not None:
+                        off = xfrm.find(f"{_PPTX_NS_A}off")
+                        ext = xfrm.find(f"{_PPTX_NS_A}ext")
+                        ch_off = xfrm.find(f"{_PPTX_NS_A}chOff")
+                        ch_ext = xfrm.find(f"{_PPTX_NS_A}chExt")
+                        gx = float(off.get("x", "0")) if off is not None else lx
+                        gy = float(off.get("y", "0")) if off is not None else ly
+                        gcx = float(ext.get("cx", "0")) if ext is not None else lw
+                        gcy = float(ext.get("cy", "0")) if ext is not None else lh
+                        cx0 = float(ch_off.get("x", "0")) if ch_off is not None else 0.0
+                        cy0 = float(ch_off.get("y", "0")) if ch_off is not None else 0.0
+                        ccx = float(ch_ext.get("cx", "0")) if ch_ext is not None else gcx
+                        ccy = float(ch_ext.get("cy", "0")) if ch_ext is not None else gcy
+
+                        wgx = ox_emu + gx * sx
+                        wgy = oy_emu + gy * sy
+                        nsx = sx * (gcx / ccx if ccx else 1.0)
+                        nsy = sy * (gcy / ccy if ccy else 1.0)
+                        _walk_shapes(shp.shapes, wgx - cx0 * nsx, wgy - cy0 * nsy, nsx, nsy, True)
+                    else:
+                        _walk_shapes(shp.shapes, ox_emu, oy_emu, sx, sy, True)
+                    continue
+
+                x_pt = wx_emu / 12700.0
+                y_pt = wy_emu / 12700.0
+                w_pt = max(ww_emu / 12700.0, 1.0)
+                h_pt = max(wh_emu / 12700.0, 1.0)
+
+                # Picture (including populated Picture Placeholder)
+                img_blob = None
+                try:
+                    if shp.shape_type == MSO_SHAPE_TYPE.PICTURE or (hasattr(shp, "image") and shp.image is not None):
+                        img_blob = shp.image.blob
+                except Exception:
+                    img_blob = None
+
+                if img_blob is not None:
+                    has_alpha = False
+                    img_fmt = "PNG"
+                    try:
+                        with Image.open(io.BytesIO(img_blob)) as im:
+                            img_fmt = (im.format or "PNG").upper()
+                            has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+                    except Exception:
+                        pass
+                    items.append({
+                        "kind": "picture",
+                        "x": x_pt, "y": y_pt, "w": w_pt, "h": h_pt,
+                        "blob": img_blob,
+                        "fmt": img_fmt,
+                        "has_alpha": has_alpha,
+                        "slide_bg_hex": slide_bg_hex,
+                        "in_group": in_group,
+                    })
+                    continue
+
+                if shp.has_table:
+                    tbl_data = _extract_pptx_table_data(shp, part_rels, theme_colors, slide_bg_hex)
+                    items.append({
+                        "kind": "table",
+                        "x": x_pt, "y": y_pt, "w": w_pt, "h": h_pt,
+                        "in_group": in_group,
+                        **tbl_data,
+                    })
+                    continue
+
+                fill_hex = _resolve_pptx_fill_hex(getattr(shp, "fill", None), theme_colors, slide_bg_hex)
+                line_hex = None
+                line_w_pt = 0.0
+                try:
+                    if shp.line and shp.line.fill and shp.line.fill.type == 1:
+                        line_hex = _resolve_pptx_color_hex(shp.line.fill.fore_color, theme_colors)
+                        line_w_pt = max((shp.line.width or Pt(1)) / 12700.0, 0.5)
+                except Exception:
+                    pass
+
+                auto_type = None
+                try:
+                    auto_type = shp.auto_shape_type
+                except Exception:
+                    auto_type = None
+
+                eff_bg = fill_hex or slide_bg_hex
+                eff_dark = _is_dark_hex(eff_bg)
+                def_fg = "FFFFFF" if eff_dark else "0F172A"
+
+                paras: List[Dict[str, Any]] = []
+                is_mono_block = False
+                anchor = MSO_ANCHOR.TOP
+                margins = (6.0, 6.0, 4.0, 4.0)
+                if shp.has_text_frame:
+                    tf = shp.text_frame
+                    paras, is_mono_block = _extract_pptx_text_frame(
+                        tf, part_rels, theme_colors, def_fg, is_placeholder=bool(getattr(shp, "is_placeholder", False))
+                    )
+                    try:
+                        if tf.vertical_anchor is not None:
+                            anchor = tf.vertical_anchor
+                    except Exception:
+                        pass
+                    ml = (tf.margin_left / 12700.0) if tf.margin_left is not None else 6.0
+                    mr = (tf.margin_right / 12700.0) if tf.margin_right is not None else 6.0
+                    mt = (tf.margin_top / 12700.0) if tf.margin_top is not None else 4.0
+                    mb = (tf.margin_bottom / 12700.0) if tf.margin_bottom is not None else 4.0
+                    margins = (max(ml, 2.0), max(mr, 2.0), max(mt, 2.0), max(mb, 2.0))
+
+                plain_text = "\n".join(p["plain_text"].strip() for p in paras if p["plain_text"].strip()).strip()
+                if fill_hex is None and line_hex is None and not plain_text:
+                    continue
+
+                # Ensure contrast if text color matches effective background (e.g. unstyled run on dark bg)
+                if eff_dark:
+                    for p in paras:
+                        for seg in p["segments"]:
+                            if seg["color"] in (None, "000000", "0F172A", "1E293B"):
+                                seg["color"] = "FFFFFF"
+
+                is_title_placeholder = False
+                try:
+                    is_title_placeholder = (shp == slide.shapes.title)
+                except Exception:
+                    pass
+
+                items.append({
+                    "kind": "shape",
+                    "x": x_pt, "y": y_pt, "w": w_pt, "h": h_pt,
+                    "shape_type": shp.shape_type,
+                    "auto_shape_type": auto_type,
+                    "fill_hex": fill_hex,
+                    "line_hex": line_hex,
+                    "line_w_pt": line_w_pt,
+                    "anchor": anchor,
+                    "margins": margins,
+                    "paras": paras,
+                    "plain_text": plain_text,
+                    "is_mono_block": is_mono_block,
+                    "is_title_placeholder": is_title_placeholder,
+                    "in_group": in_group,
+                    "eff_dark": eff_dark,
+                })
+
+        _walk_shapes(slide.shapes, 0.0, 0.0, 1.0, 1.0, False)
+
+        # Determine slide title + optional subtitle
+        title_item_idx: Optional[int] = None
+        slide_title = ""
+        for idx, it in enumerate(items):
+            if it["kind"] == "shape" and it["is_title_placeholder"] and it["plain_text"]:
+                title_item_idx = idx
+                first_line = next((p["plain_text"].strip() for p in it["paras"] if p["plain_text"].strip()), "")
+                slide_title = first_line
+                break
+
+        if not slide_title:
+            # Topmost non-group text shape with large font or near top band
+            best_score = None
+            for idx, it in enumerate(items):
+                if it["kind"] != "shape" or not it["plain_text"] or it["in_group"] or it["is_mono_block"]:
+                    continue
+                first_p = next((p for p in it["paras"] if p["plain_text"].strip()), None)
+                if not first_p:
+                    continue
+                cand = first_p["plain_text"].strip()
+                if len(cand) > 150:
+                    continue
+                sz = first_p.get("size_pt", 13.0)
+                if it["y"] < slide_h_pt * 0.45 or sz >= 18.0:
+                    score = (0 if it["y"] < 100.0 else 1, -sz, it["y"], it["x"])
+                    if best_score is None or score < best_score:
+                        best_score = score
+                        title_item_idx = idx
+                        slide_title = cand
+
+        # Extract speaker notes
+        speaker_notes = ""
+        try:
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                speaker_notes = slide.notes_slide.notes_text_frame.text.strip()
+        except Exception:
+            speaker_notes = ""
+
+        # Check if completely blank or image-only
+        has_text = any(it["kind"] == "shape" and it["plain_text"] for it in items) or any(it["kind"] == "table" for it in items)
+        has_pics = any(it["kind"] == "picture" for it in items)
+        is_blank = (not items) or (not has_text and not has_pics and not any(it.get("fill_hex") for it in items))
+        is_image_only = has_pics and not has_text
+
+        slides_out.append({
+            "index": s_idx,
+            "bg_hex": slide_bg_hex,
+            "is_dark": slide_dark,
+            "items": items,
+            "title_item_idx": title_item_idx,
+            "title": slide_title or f"Slide {s_idx}",
+            "has_explicit_title": bool(slide_title),
+            "speaker_notes": speaker_notes,
+            "is_blank": is_blank,
+            "is_image_only": is_image_only,
+        })
+
+    return {
+        "slide_w_pt": slide_w_pt,
+        "slide_h_pt": slide_h_pt,
+        "slides": slides_out,
+    }
 
 
-def pptx_to_xlsx(pptx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Extracts tables from PPTX slides to sheets and collects slide text in Document Text."""
-    docx_bytes, _, _, cnt = pptx_to_docx(pptx_bytes, base_name)
-    return docx_to_xlsx(docx_bytes, base_name)
+def _pptx_to_pdf_reportlab(pptx_bytes: bytes) -> bytes:
+    """
+    Renders PowerPoint slides onto an exact-dimension ReportLab PDF canvas preserving:
+    - True 16:9 vs 4:3 (or custom) slide geometry
+    - Dark & light slide backgrounds, shape fills, rounded cards, arrows & callouts
+    - Recursively unwrapped GroupShapes with exact world coordinates
+    - Transparent RGBA PNGs via PDF SMask (zero black boxes / zero white patches on dark slides)
+    - Bundled DejaVu Sans & DejaVu Sans Mono TTF fonts for crisp ₹, €, £, —, ±, α, β, μ, ≤, ≥, °C, Ω
+    - Merged & shaded tables with auto-fit wrapping and clickable hyperlinks
+    """
+    sans_family, mono_family = _ensure_reportlab_unicode_fonts()
+    model = _extract_pptx_deck_model(pptx_bytes)
+    sw = model["slide_w_pt"]
+    sh = model["slide_h_pt"]
+    slides = model["slides"]
+
+    buffer = io.BytesIO()
+    c = rl_canvas.Canvas(buffer, pagesize=(sw, sh))
+    img_reader_cache: Dict[int, Tuple[ImageReader, io.BytesIO]] = {}
+
+    def _get_image_reader(blob: bytes, has_alpha: bool, fmt: str) -> ImageReader:
+        key = hash(blob)
+        if key in img_reader_cache:
+            return img_reader_cache[key][0]
+        if has_alpha or fmt not in ("PNG", "JPEG", "JPG"):
+            with Image.open(io.BytesIO(blob)) as im:
+                conv = im.convert("RGBA") if has_alpha else im.convert("RGB")
+                ibuf = io.BytesIO()
+                conv.save(ibuf, format="PNG")
+                ibuf.seek(0)
+        else:
+            ibuf = io.BytesIO(blob)
+        reader = ImageReader(ibuf)
+        img_reader_cache[key] = (reader, ibuf)
+        return reader
+
+    def _draw_autoshape_geometry(item: Dict[str, Any], x: float, yb: float, w: float, h: float):
+        fill_hex = item.get("fill_hex")
+        line_hex = item.get("line_hex")
+        line_w = item.get("line_w_pt", 0.75)
+        do_fill = 1 if fill_hex else 0
+        do_stroke = 1 if line_hex else 0
+        if not do_fill and not do_stroke:
+            return
+
+        c.saveState()
+        if do_fill:
+            c.setFillColor(colors.HexColor(f"#{fill_hex}"))
+        if do_stroke:
+            c.setStrokeColor(colors.HexColor(f"#{line_hex}"))
+            c.setLineWidth(line_w)
+
+        atype = item.get("auto_shape_type")
+        if atype == MSO_SHAPE.OVAL:
+            c.ellipse(x, yb, x + w, yb + h, stroke=do_stroke, fill=do_fill)
+        elif atype in (MSO_SHAPE.ROUNDED_RECTANGLE, MSO_SHAPE.RECTANGULAR_CALLOUT, MSO_SHAPE.ROUNDED_RECTANGULAR_CALLOUT):
+            rad = max(min(w, h) * 0.10, 4.0)
+            rad = min(rad, 16.0)
+            c.roundRect(x, yb, w, h, radius=rad, stroke=do_stroke, fill=do_fill)
+        elif atype == MSO_SHAPE.RIGHT_ARROW:
+            p = c.beginPath()
+            hw = x + w * 0.62
+            p.moveTo(x, yb + h * 0.25)
+            p.lineTo(hw, yb + h * 0.25)
+            p.lineTo(hw, yb)
+            p.lineTo(x + w, yb + h * 0.50)
+            p.lineTo(hw, yb + h)
+            p.lineTo(hw, yb + h * 0.75)
+            p.lineTo(x, yb + h * 0.75)
+            p.close()
+            c.drawPath(p, stroke=do_stroke, fill=do_fill)
+        elif atype == MSO_SHAPE.LEFT_ARROW:
+            p = c.beginPath()
+            hw = x + w * 0.38
+            p.moveTo(x + w, yb + h * 0.25)
+            p.lineTo(hw, yb + h * 0.25)
+            p.lineTo(hw, yb)
+            p.lineTo(x, yb + h * 0.50)
+            p.lineTo(hw, yb + h)
+            p.lineTo(hw, yb + h * 0.75)
+            p.lineTo(x + w, yb + h * 0.75)
+            p.close()
+            c.drawPath(p, stroke=do_stroke, fill=do_fill)
+        elif atype == MSO_SHAPE.DOWN_ARROW:
+            p = c.beginPath()
+            hy = yb + h * 0.38
+            p.moveTo(x + w * 0.25, yb + h)
+            p.lineTo(x + w * 0.25, hy)
+            p.lineTo(x, hy)
+            p.lineTo(x + w * 0.50, yb)
+            p.lineTo(x + w, hy)
+            p.lineTo(x + w * 0.75, hy)
+            p.lineTo(x + w * 0.75, yb + h)
+            p.close()
+            c.drawPath(p, stroke=do_stroke, fill=do_fill)
+        elif atype == MSO_SHAPE.UP_ARROW:
+            p = c.beginPath()
+            hy = yb + h * 0.62
+            p.moveTo(x + w * 0.25, yb)
+            p.lineTo(x + w * 0.25, hy)
+            p.lineTo(x, hy)
+            p.lineTo(x + w * 0.50, yb + h)
+            p.lineTo(x + w, hy)
+            p.lineTo(x + w * 0.75, hy)
+            p.lineTo(x + w * 0.75, yb)
+            p.close()
+            c.drawPath(p, stroke=do_stroke, fill=do_fill)
+        else:
+            c.rect(x, yb, w, h, stroke=do_stroke, fill=do_fill)
+        c.restoreState()
+
+    def _draw_textbox(item: Dict[str, Any], x: float, yb: float, w: float, h: float):
+        paras = item.get("paras") or []
+        non_empty = [p for p in paras if p["plain_text"].strip()]
+        if not non_empty:
+            return
+
+        ml, mr, mt, mb = item.get("margins", (6.0, 6.0, 4.0, 4.0))
+        inner_w = max(w - ml - mr, 24.0)
+        # Keep text inside slide bottom even if shape extends slightly
+        eff_yb = max(yb, 4.0)
+        eff_h = max((yb + h) - eff_yb, 16.0)
+        inner_h = max(eff_h - mt - mb, 12.0)
+
+        def_color = "FFFFFF" if item.get("eff_dark") else "0F172A"
+        is_mono_blk = item.get("is_mono_block", False)
+
+        def _build_flowables(scale: float):
+            flows: List[Tuple[RLParagraph, float, float, float]] = []
+            tot_h = 0.0
+            for p_idx, p_info in enumerate(non_empty):
+                segs = []
+                for s in p_info["segments"]:
+                    sc = dict(s)
+                    if sc.get("size"):
+                        sc["size"] = max(6.5, sc["size"] * scale)
+                    segs.append(sc)
+                dom_pt = max(6.5, p_info.get("size_pt", 13.0) * scale)
+                mk = _segments_to_rl_markup(
+                    segs,
+                    mono_family,
+                    preserve_newlines=is_mono_blk,
+                    default_color=def_color,
+                    strip_edges=not is_mono_blk,
+                    base_font_size=dom_pt,
+                )
+                if not mk:
+                    continue
+                li = p_info.get("list_info")
+                lvl = p_info.get("level", 0)
+                left_ind = 0.0
+                first_ind = 0.0
+                if li is not None:
+                    prefix = html.escape(li["prefix"])
+                    mk = f"<b>{prefix}</b>{mk}" if li["ordered"] else f"{prefix}{mk}"
+                    left_ind = 12.0 + lvl * 14.0
+                    first_ind = -10.0
+                elif lvl > 0:
+                    left_ind = lvl * 14.0
+
+                leading = round(dom_pt * 1.24, 2)
+                st = ParagraphStyle(
+                    f"PptxP_{p_idx}",
+                    fontName=mono_family if is_mono_blk else sans_family,
+                    fontSize=dom_pt,
+                    leading=leading,
+                    alignment=p_info.get("align", TA_LEFT),
+                    leftIndent=left_ind,
+                    firstLineIndent=first_ind,
+                    textColor=colors.HexColor(f"#{def_color}"),
+                )
+                rl_p = RLParagraph(mk, st)
+                _, ph = rl_p.wrapOn(c, inner_w, 10000.0)
+                sb = p_info.get("space_before", 0.0) * scale if p_idx > 0 else 0.0
+                sa = min(p_info.get("space_after", 2.5), 6.0) * scale
+                flows.append((rl_p, ph, sb, sa))
+                tot_h += sb + ph + sa
+            return flows, tot_h
+
+        scale = 1.0
+        flows, tot_h = _build_flowables(scale)
+        if tot_h > inner_h + 2.0 and tot_h > 0:
+            scale = max(0.62, (inner_h / tot_h) * 0.96)
+            flows, tot_h = _build_flowables(scale)
+            if tot_h > inner_h + 2.0:
+                scale = max(0.55, scale * (inner_h / max(tot_h, 1.0)) * 0.96)
+                flows, tot_h = _build_flowables(scale)
+
+        if not flows:
+            return
+
+        avail_top = eff_yb + eff_h - mt
+        avail_bot = eff_yb + mb
+        anchor = item.get("anchor", MSO_ANCHOR.TOP)
+        if anchor == MSO_ANCHOR.MIDDLE and tot_h < inner_h:
+            cur_y = avail_top - (inner_h - tot_h) / 2.0
+        elif anchor == MSO_ANCHOR.BOTTOM and tot_h < inner_h:
+            cur_y = avail_bot + tot_h
+        else:
+            cur_y = avail_top
+
+        for rl_p, ph, sb, sa in flows:
+            cur_y -= sb
+            draw_y = cur_y - ph
+            if draw_y >= 2.0:
+                rl_p.drawOn(c, x + ml, draw_y)
+            cur_y -= (ph + sa)
+
+    def _draw_table(item: Dict[str, Any], x: float, yb: float, w: float, h: float):
+        raw_rows = item.get("raw_rows") or []
+        if not raw_rows:
+            return
+        n_c = len(raw_rows[0])
+        col_ws = item.get("col_widths_pt") or [w / max(n_c, 1)] * n_c
+        sum_cw = max(sum(col_ws), 1.0)
+        max_avail_w = min(w, max(sw - x - 6.0, 40.0))
+        scaled_ws = [cw * (max_avail_w / sum_cw) for cw in col_ws]
+        top_y = min(yb + h, sh - 4.0)
+        max_avail_h = max(top_y - 6.0, 40.0)
+
+        def _build_rl_table(font_scale: float, v_pad: float, h_pad: float) -> Tuple[RLTable, float]:
+            table_data = []
+            ts_cmds = [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E1")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), v_pad),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), v_pad),
+                ("LEFTPADDING", (0, 0), (-1, -1), h_pad),
+                ("RIGHTPADDING", (0, 0), (-1, -1), h_pad),
+            ]
+            for r_i, row in enumerate(raw_rows):
+                r_out = []
+                for c_i, cell in enumerate(row):
+                    if not cell.get("is_origin"):
+                        r_out.append("")
+                        continue
+                    fill_hex = cell.get("fill") or "FFFFFF"
+                    ts_cmds.append(("BACKGROUND", (c_i, r_i), (c_i, r_i), colors.HexColor(f"#{fill_hex}")))
+                    dark_cell = _is_dark_hex(fill_hex)
+                    def_fg = "FFFFFF" if dark_cell else "0F172A"
+                    cell_paras = []
+                    for p_info in cell.get("paras", []):
+                        if not p_info["plain_text"].strip():
+                            continue
+                        segs = []
+                        for s in p_info["segments"]:
+                            sc = dict(s)
+                            if sc.get("size"):
+                                sc["size"] = max(6.0, sc["size"] * font_scale)
+                            segs.append(sc)
+                        f_pt = max(6.0, p_info.get("size_pt", 9.5) * font_scale)
+                        mk = _segments_to_rl_markup(segs, mono_family, default_color=def_fg, base_font_size=f_pt)
+                        is_b = any(s.get("bold") for s in segs)
+                        st = ParagraphStyle(
+                            f"PptxTC_{r_i}_{c_i}",
+                            fontName=f"{sans_family}-Bold" if (is_b and sans_family == "VelmoSans") else sans_family,
+                            fontSize=f_pt,
+                            leading=round(f_pt * 1.24, 1),
+                            alignment=p_info.get("align", TA_LEFT),
+                            textColor=colors.HexColor(f"#{def_fg}"),
+                        )
+                        cell_paras.append(RLParagraph(mk, st))
+                    r_out.append(cell_paras if len(cell_paras) > 1 else (cell_paras[0] if cell_paras else ""))
+                table_data.append(r_out)
+
+            for c0, r0, c1, r1 in item.get("span_cmds", []):
+                ts_cmds.append(("SPAN", (c0, r0), (c1, r1)))
+
+            rl_tbl = RLTable(table_data, colWidths=scaled_ws)
+            rl_tbl.setStyle(TableStyle(ts_cmds))
+            _, act_h = rl_tbl.wrapOn(c, max_avail_w, sh)
+            return rl_tbl, act_h
+
+        rl_tbl, act_h = _build_rl_table(1.0, 3.5, 4.5)
+        if act_h > max_avail_h:
+            for f_sc, vp, hp in [(0.86, 2.5, 3.5), (0.76, 2.0, 3.0), (0.68, 1.5, 2.5)]:
+                rl_tbl, act_h = _build_rl_table(f_sc, vp, hp)
+                if act_h <= max_avail_h:
+                    break
+
+        draw_y = max(top_y - act_h, 4.0)
+        rl_tbl.drawOn(c, x, draw_y)
+
+    try:
+        if not slides:
+            c.setFillColor(colors.white)
+            c.rect(0, 0, sw, sh, fill=1, stroke=0)
+            c.showPage()
+        else:
+            for s_data in slides:
+                c.setPageSize((sw, sh))
+                bg_hex = s_data["bg_hex"]
+                c.saveState()
+                c.setFillColor(colors.HexColor(f"#{bg_hex}"))
+                c.rect(0, 0, sw, sh, fill=1, stroke=0)
+                c.restoreState()
+
+                for item in s_data["items"]:
+                    x = item["x"]
+                    w = item["w"]
+                    h = item["h"]
+                    yb = sh - item["y"] - h
+                    kind = item["kind"]
+
+                    if kind == "picture":
+                        try:
+                            reader = _get_image_reader(item["blob"], item["has_alpha"], item["fmt"])
+                            c.drawImage(
+                                reader, x, yb, width=w, height=h,
+                                mask="auto" if item["has_alpha"] else None,
+                                preserveAspectRatio=False,
+                            )
+                        except Exception as img_err:
+                            logger.warning(f"PPTX->PDF image draw failed on slide {s_data['index']}: {img_err}")
+                    elif kind == "table":
+                        _draw_table(item, x, yb, w, h)
+                    elif kind == "shape":
+                        _draw_autoshape_geometry(item, x, yb, w, h)
+                        if item.get("plain_text"):
+                            _draw_textbox(item, x, yb, w, h)
+
+                c.showPage()
+
+        c.save()
+        return buffer.getvalue()
+    finally:
+        img_reader_cache.clear()
+        gc.collect()
 
 
 def pptx_to_pdf(pptx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
-    """Converts PPTX to PDF via LibreOffice headless or clean landscape ReportLab slide deck."""
+    """Converts PPTX to PDF via LibreOffice headless or exact-geometry ReportLab slide renderer."""
     pdf_bytes = convert_via_libreoffice(pptx_bytes, ".pptx")
     if not pdf_bytes:
         pdf_bytes = _pptx_to_pdf_reportlab(pptx_bytes)
     return pdf_bytes, "application/pdf", f"{base_name}.pdf", 1
 
 
-def _pptx_to_pdf_reportlab(pptx_bytes: bytes) -> bytes:
-    prs = Presentation(io.BytesIO(pptx_bytes))
-    buffer = io.BytesIO()
-    pdf_doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+def _flatten_pptx_image_for_doc(blob: bytes, has_alpha: bool, bg_hex: str = "FFFFFF") -> Tuple[bytes, int, int]:
+    """Composites RGBA/LA/P images onto bg_hex (e.g., dark slide bg for white logos, white otherwise) as clean PNG."""
+    with Image.open(io.BytesIO(blob)) as im:
+        iw, ih = max(im.width, 1), max(im.height, 1)
+        fmt = (im.format or "").upper()
+        mode = im.mode
+        if has_alpha or mode in ("RGBA", "LA") or (mode == "P" and "transparency" in im.info):
+            hx = bg_hex if re.match(r"^[0-9A-F]{6}$", (bg_hex or "").upper()) else "FFFFFF"
+            r_bg, g_bg, b_bg = int(hx[0:2], 16), int(hx[2:4], 16), int(hx[4:6], 16)
+            im_rgba = im.convert("RGBA")
+            bg = Image.new("RGBA", im_rgba.size, (r_bg, g_bg, b_bg, 255))
+            flat = Image.alpha_composite(bg, im_rgba).convert("RGB")
+            buf = io.BytesIO()
+            flat.save(buf, format="PNG")
+            return buf.getvalue(), iw, ih
+        if fmt not in ("PNG", "JPEG", "JPG") or mode not in ("RGB", "L"):
+            rgb = im.convert("RGB")
+            buf = io.BytesIO()
+            rgb.save(buf, format="PNG")
+            return buf.getvalue(), iw, ih
+        return blob, iw, ih
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('SlideTitle', parent=styles['Heading1'], fontSize=20, leading=24, spaceAfter=14, textColor=colors.HexColor('#0F172A'))
-    bullet_style = ParagraphStyle('SlideBullet', parent=styles['Normal'], fontSize=12, leading=16, spaceAfter=8, textColor=colors.HexColor('#334155'))
-    cell_style = ParagraphStyle('SlideCell', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor('#0F172A'))
-    header_style = ParagraphStyle('SlideHeader', parent=styles['Normal'], fontSize=9, leading=12, fontName='Helvetica-Bold', textColor=colors.HexColor('#0F172A'))
 
-    story = []
-    for idx, slide in enumerate(prs.slides, start=1):
-        if idx > 1:
-            story.append(PageBreak())
+def _apply_docx_para_callout_style(p, bg_hex: str, border_hex: str):
+    """Applies Word XML paragraph shading and left accent border to a python-docx Paragraph."""
+    try:
+        pPr = p._p.get_or_add_pPr()
+        for tag in ("shd", "pBdr"):
+            old = pPr.find(f"{{http://schemas.openxmlformats.org/wordprocessingml/2006/main}}{tag}")
+            if old is not None:
+                pPr.remove(old)
+        pPr.append(parse_xml(f'<w:shd {nsdecls("w")} w:fill="{bg_hex}"/>'))
+        pPr.append(parse_xml(
+            f'<w:pBdr {nsdecls("w")}>'
+            f'<w:left w:val="single" w:sz="18" w:space="6" w:color="{border_hex}"/>'
+            f'</w:pBdr>'
+        ))
+    except Exception:
+        pass
 
-        title_text, title_shape, skip_first_p = _extract_slide_title(slide, f"Slide {idx}")
-        story.append(RLParagraph(html.escape(title_text), title_style))
 
-        for shape in slide.shapes:
-            if shape == title_shape and not skip_first_p:
-                continue
-            if shape.has_text_frame:
-                paragraphs = shape.text_frame.paragraphs
-                if shape == title_shape and skip_first_p:
-                    paragraphs = paragraphs[1:]
-                for p in paragraphs:
-                    t = p.text.strip()
-                    if t:
-                        prefix = "• " if p.level > 0 else ""
-                        story.append(RLParagraph(html.escape(prefix + t), bullet_style))
-            elif shape.has_table:
-                tbl = shape.table
-                table_data = []
-                for r_idx, row in enumerate(tbl.rows):
-                    row_data = [RLParagraph(html.escape(cell.text.strip()), header_style if r_idx == 0 else cell_style) for cell in row.cells]
-                    table_data.append(row_data)
-                if table_data:
-                    rl_tbl = RLTable(table_data)
-                    rl_tbl.setStyle(TableStyle([
-                        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
-                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#F1F5F9')),
-                        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                        ('TOPPADDING', (0, 0), (-1, -1), 4),
-                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
-                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
-                    ]))
-                    story.append(rl_tbl)
-                    story.append(Spacer(1, 10))
+def _append_pptx_segments_to_docx_para(
+    p,
+    segments: List[Dict[str, Any]],
+    default_pt: float = 10.5,
+    bg_is_dark: bool = False,
+    force_mono: bool = False,
+):
+    """Populates a python-docx paragraph from PPTX segments preserving styles, colors, and clickable hyperlinks."""
+    for seg in segments:
+        txt = seg.get("text", "")
+        if not txt:
+            continue
+        col = (seg.get("color") or "").upper()
+        if bg_is_dark:
+            if col in ("", "000000", "0F172A", "1E293B", "334155"):
+                col = "FFFFFF"
+        else:
+            # On white Word background, avoid invisible white/near-white runs
+            if not col or col in ("FFFFFF", "F8FAFC", "F1F5F9", "E2E8F0"):
+                col = "0F172A"
 
-    if not story:
-        story.append(RLParagraph("Empty Presentation", bullet_style))
+        if seg.get("url"):
+            link_col = "93C5FD" if bg_is_dark else "2563EB"
+            _add_docx_hyperlink(p, seg["url"], txt, default_pt, hex_color=link_col, bold=bool(seg.get("bold")))
+            continue
 
-    pdf_doc.build(story)
-    return buffer.getvalue()
+        run = p.add_run(txt)
+        run.font.size = DocxPt(default_pt)
+        run.bold = bool(seg.get("bold"))
+        run.italic = bool(seg.get("italic"))
+        run.underline = bool(seg.get("underline"))
+        if force_mono or seg.get("mono"):
+            run.font.name = "Consolas"
+        if re.match(r"^[0-9A-F]{6}$", col) and col not in ("000000", "0F172A"):
+            run.font.color.rgb = DocxRGBColor(int(col[0:2], 16), int(col[2:4], 16), int(col[4:6], 16))
+        elif bg_is_dark:
+            run.font.color.rgb = DocxRGBColor(255, 255, 255)
+
+
+def pptx_to_docx(pptx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+    """
+    Converts PowerPoint slides into a rich editable Word document preserving:
+    - Slide titles (Heading 1) with clean page breaks per slide
+    - Recursively unwrapped GroupShape KPI callout cards
+    - Multi-level bulleted & numbered lists, bold/italic/underline/colored runs, monospace code blocks
+    - Clickable hyperlinks, embedded images (RGBA composited cleanly), merged & shaded tables, and speaker notes
+    """
+    model = _extract_pptx_deck_model(pptx_bytes)
+    slides = model["slides"]
+    doc = Document()
+
+    for sec in doc.sections:
+        sec.left_margin = DocxInches(0.75)
+        sec.right_margin = DocxInches(0.75)
+        sec.top_margin = DocxInches(0.70)
+        sec.bottom_margin = DocxInches(0.70)
+
+    avail_w_in = 7.0
+    ns_w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+    for s_idx, s_data in enumerate(slides, start=1):
+        h = doc.add_heading(s_data["title"], level=1)
+        if s_idx > 1:
+            h.paragraph_format.page_break_before = True
+
+        if s_data["title_item_idx"] is not None:
+            t_item = s_data["items"][s_data["title_item_idx"]]
+            t_paras = [p for p in t_item.get("paras", []) if p["plain_text"].strip()]
+            if len(t_paras) > 1:
+                for p_extra in t_paras[1:]:
+                    dp_sub = doc.add_paragraph()
+                    _append_pptx_segments_to_docx_para(dp_sub, p_extra["segments"], default_pt=10.5, bg_is_dark=False)
+
+        if s_data["is_blank"]:
+            p_blank = doc.add_paragraph()
+            r_b = p_blank.add_run("(Blank slide)")
+            r_b.italic = True
+            r_b.font.color.rgb = DocxRGBColor(100, 116, 139)
+
+        # Sort body items in natural top-to-bottom, left-to-right reading order
+        body_items = [
+            it for idx, it in enumerate(s_data["items"])
+            if idx != s_data["title_item_idx"]
+        ]
+        body_items.sort(key=lambda it: (round(it["y"] / 16.0), it["x"]))
+
+        for item in body_items:
+            kind = item["kind"]
+            if kind == "picture":
+                try:
+                    bg_for_img = item["slide_bg_hex"] if _is_dark_hex(item["slide_bg_hex"]) else "FFFFFF"
+                    flat_bytes, iw, ih = _flatten_pptx_image_for_doc(item["blob"], item["has_alpha"], bg_for_img)
+                    w_in = min(avail_w_in, max(item["w"] / 72.0 * 0.72, 1.4))
+                    if item["w"] / 72.0 > 7.5:
+                        w_in = avail_w_in
+                    p_img = doc.add_paragraph()
+                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_img.add_run().add_picture(io.BytesIO(flat_bytes), width=DocxInches(w_in))
+                except Exception as img_err:
+                    logger.warning(f"PPTX->DOCX image embed failed on slide {s_idx}: {img_err}")
+
+            elif kind == "table":
+                raw_rows = item["raw_rows"]
+                n_r = len(raw_rows)
+                n_c = len(raw_rows[0]) if n_r else 0
+                if n_r == 0 or n_c == 0:
+                    continue
+                doc_tbl = doc.add_table(rows=n_r, cols=n_c)
+                doc_tbl.style = "Table Grid"
+
+                col_ws = item["col_widths_pt"]
+                sum_cw = max(sum(col_ws), 1.0)
+                doc_col_pts = [(cw / sum_cw) * (avail_w_in * 72.0) for cw in col_ws]
+
+                for r_i, row in enumerate(raw_rows):
+                    if r_i == 0:
+                        trPr = doc_tbl.rows[0]._tr.get_or_add_trPr()
+                        trPr.append(parse_xml(f'<w:tblHeader {nsdecls("w")}/>'))
+                    for c_i, cell_info in enumerate(row):
+                        dcell = doc_tbl.cell(r_i, c_i)
+                        _set_docx_cell_width_and_margins(dcell, doc_col_pts[c_i], v_pad_tw=40, h_pad_tw=65)
+                        dcell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                        fill_hex = cell_info.get("fill") or "FFFFFF"
+                        set_cell_background(dcell, fill_hex)
+                        if not cell_info.get("is_origin"):
+                            continue
+                        dark_c = _is_dark_hex(fill_hex)
+                        non_empty_paras = [p for p in cell_info["paras"] if p["plain_text"].strip()]
+                        for p_i, p_info in enumerate(non_empty_paras):
+                            dp = dcell.paragraphs[0] if p_i == 0 else dcell.add_paragraph()
+                            dp.paragraph_format.space_before = DocxPt(0)
+                            dp.paragraph_format.space_after = DocxPt(2)
+                            _append_pptx_segments_to_docx_para(dp, p_info["segments"], default_pt=9.5, bg_is_dark=dark_c)
+
+                for c0, r0, c1, r1 in item.get("span_cmds", []):
+                    try:
+                        doc_tbl.cell(r0, c0).merge(doc_tbl.cell(r1, c1))
+                    except Exception:
+                        pass
+                doc.add_paragraph()
+
+            elif kind == "shape":
+                non_empty_paras = [p for p in item.get("paras", []) if p["plain_text"].strip()]
+                if not non_empty_paras:
+                    continue
+                fill_hex = item.get("fill_hex")
+                is_card = bool(fill_hex and fill_hex not in ("FFFFFF", "AUTO"))
+                card_dark = is_card and _is_dark_hex(fill_hex)
+
+                if item.get("is_mono_block"):
+                    p_code = doc.add_paragraph()
+                    _apply_docx_para_callout_style(p_code, "F1F5F9", "475569")
+                    code_txt = "\n".join(p["plain_text"] for p in non_empty_paras)
+                    r_c = p_code.add_run(code_txt)
+                    r_c.font.name = "Consolas"
+                    r_c.font.size = DocxPt(9.0)
+                    r_c.font.color.rgb = DocxRGBColor(15, 23, 42)
+                    continue
+
+                if is_card and (item.get("in_group") or len(non_empty_paras) <= 4):
+                    p_card = doc.add_paragraph()
+                    border_col = item.get("line_hex") or ("38BDF8" if card_dark else "2563EB")
+                    _apply_docx_para_callout_style(p_card, fill_hex, border_col)
+                    for p_i, p_info in enumerate(non_empty_paras):
+                        if p_i > 0:
+                            p_card.add_run("\n")
+                        _append_pptx_segments_to_docx_para(
+                            p_card, p_info["segments"], default_pt=10.5, bg_is_dark=card_dark
+                        )
+                    continue
+
+                for p_info in non_empty_paras:
+                    li = p_info.get("list_info")
+                    lvl = p_info.get("level", 0)
+                    if li is not None:
+                        base_s = "List Number" if li["ordered"] else "List Bullet"
+                        style_cand = base_s if lvl == 0 else (f"{base_s} 2" if lvl == 1 else f"{base_s} 3")
+                        try:
+                            dp = doc.add_paragraph(style=style_cand)
+                        except Exception:
+                            dp = doc.add_paragraph(style=base_s)
+                        if lvl > 0:
+                            dp.paragraph_format.left_indent = DocxInches(0.25 * (lvl + 1))
+                    else:
+                        dp = doc.add_paragraph()
+                        if lvl > 0:
+                            dp.paragraph_format.left_indent = DocxInches(0.25 * lvl)
+                    if is_card:
+                        _apply_docx_para_callout_style(dp, fill_hex, item.get("line_hex") or "2563EB")
+                    _append_pptx_segments_to_docx_para(
+                        dp, p_info["segments"], default_pt=10.5, bg_is_dark=card_dark
+                    )
+
+        if s_data.get("speaker_notes"):
+            p_note = doc.add_paragraph()
+            _apply_docx_para_callout_style(p_note, "FEFCE8", "D97706")
+            rn_lbl = p_note.add_run("Speaker Notes: ")
+            rn_lbl.bold = True
+            rn_lbl.font.size = DocxPt(9.5)
+            rn_lbl.font.color.rgb = DocxRGBColor(146, 64, 14)
+            rn_txt = p_note.add_run(s_data["speaker_notes"])
+            rn_txt.italic = True
+            rn_txt.font.size = DocxPt(9.5)
+            rn_txt.font.color.rgb = DocxRGBColor(71, 85, 105)
+
+    out_io = io.BytesIO()
+    doc.save(out_io)
+    gc.collect()
+    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document", f"{base_name}.docx", len(slides)
+
+
+def _pptx_numeric_with_format(raw_text: str) -> Tuple[Any, Optional[str]]:
+    """Parses PPTX numeric string (including comma-grouped numbers) and returns (value, excel_number_format)."""
+    stripped = (raw_text or "").strip()
+    val = parse_numeric(stripped)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if re.match(r"^[+-]?\d{1,3}(,\d{3})+(\.\d+)?$", stripped):
+            if "." in stripped:
+                dec_len = len(stripped.split(".", 1)[1])
+                return val, f"#,##0.{'0' * dec_len}"
+            return val, "#,##0"
+    return val, None
+
+
+def pptx_to_xlsx(pptx_bytes: bytes, base_name: str) -> Tuple[bytes, str, str, int]:
+    """
+    Exports PowerPoint slides to a multi-sheet Excel workbook with:
+    - 'Slide Content' worksheet (titles, grouped KPI cards, lists, code blocks, clickable links)
+    - 'Speaker Notes' worksheet
+    - One styled worksheet per PPTX table preserving merges, contrast fills, comma-grouped numbers, and hyperlinks
+    """
+    model = _extract_pptx_deck_model(pptx_bytes)
+    slides = model["slides"]
+
+    wb = openpyxl.Workbook()
+    default_sheet = wb.active
+
+    thin_border = Border(
+        left=Side(style='thin', color='CBD5E1'),
+        right=Side(style='thin', color='CBD5E1'),
+        top=Side(style='thin', color='CBD5E1'),
+        bottom=Side(style='thin', color='CBD5E1'),
+    )
+    hdr_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+    hdr_font = Font(bold=True, color="FFFFFF")
+
+    used_titles: Set[str] = set()
+    content_title = sanitize_sheet_title("Slide Content", used_titles)
+    notes_title = sanitize_sheet_title("Speaker Notes", used_titles)
+
+    ws_content = wb.create_sheet(title=content_title)
+    ws_notes = wb.create_sheet(title=notes_title)
+
+    for c_i, h_lbl in enumerate(["Slide", "Type", "Content"], start=1):
+        cell = ws_content.cell(row=1, column=c_i, value=h_lbl)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+        cell.border = thin_border
+
+    for c_i, h_lbl in enumerate(["Slide", "Slide Title", "Speaker Notes"], start=1):
+        cell = ws_notes.cell(row=1, column=c_i, value=h_lbl)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+        cell.border = thin_border
+
+    content_row = 2
+    notes_row = 2
+    table_count = 0
+
+    def _add_content_row(s_lbl: str, kind_lbl: str, text_val: str, is_bold: bool = False, url: Optional[str] = None):
+        nonlocal content_row
+        c1 = ws_content.cell(row=content_row, column=1, value=s_lbl)
+        c2 = ws_content.cell(row=content_row, column=2, value=kind_lbl)
+        c3 = ws_content.cell(row=content_row, column=3, value=text_val)
+        for cc in (c1, c2, c3):
+            cc.border = thin_border
+        if is_bold:
+            c1.font = Font(bold=True)
+            c3.font = Font(bold=True)
+        if url:
+            c3.hyperlink = url
+            c3.font = Font(bold=is_bold, underline="single", color="2563EB")
+        content_row += 1
+
+    for s_data in slides:
+        s_idx = s_data["index"]
+        s_lbl = f"Slide {s_idx}"
+        _add_content_row(s_lbl, "Slide Title", s_data["title"], is_bold=True)
+
+        if s_data["title_item_idx"] is not None:
+            t_item = s_data["items"][s_data["title_item_idx"]]
+            t_paras = [p for p in t_item.get("paras", []) if p["plain_text"].strip()]
+            for p_extra in t_paras[1:]:
+                url = next((s.get("url") for s in p_extra["segments"] if s.get("url")), None)
+                _add_content_row(s_lbl, "Subtitle", _segments_to_txt(p_extra["segments"]).strip(), url=url)
+
+        if s_data["is_blank"]:
+            _add_content_row(s_lbl, "Blank Slide", "(Blank slide — no content)")
+
+        body_items = [
+            it for idx, it in enumerate(s_data["items"])
+            if idx != s_data["title_item_idx"]
+        ]
+        body_items.sort(key=lambda it: (round(it["y"] / 16.0), it["x"]))
+
+        for item in body_items:
+            kind = item["kind"]
+            if kind == "table":
+                table_count += 1
+                t_sheet_name = sanitize_sheet_title(s_data["title"] or f"Slide {s_idx} Table", used_titles)
+                ws_t = wb.create_sheet(title=t_sheet_name)
+                raw_rows = item["raw_rows"]
+                for r_i, row in enumerate(raw_rows, start=1):
+                    for c_i, cell_info in enumerate(row, start=1):
+                        xl_cell = ws_t.cell(row=r_i, column=c_i)
+                        xl_cell.border = thin_border
+                        if not cell_info.get("is_origin"):
+                            continue
+                        raw_txt = cell_info.get("plain_text", "")
+                        parsed_val, num_fmt = _pptx_numeric_with_format(raw_txt)
+                        xl_cell.value = parsed_val
+                        if num_fmt:
+                            xl_cell.number_format = num_fmt
+
+                        first_url = next(
+                            (s.get("url") for p in cell_info.get("paras", []) for s in p.get("segments", []) if s.get("url")),
+                            None,
+                        )
+                        if first_url:
+                            xl_cell.hyperlink = first_url
+
+                        fill_hex = cell_info.get("fill")
+                        is_cell_bold = (r_i == 1) or any(
+                            s.get("bold") for p in cell_info.get("paras", []) for s in p.get("segments", [])
+                        )
+                        dark_c = _is_dark_hex(fill_hex)
+                        if fill_hex and fill_hex not in ("FFFFFF", "AUTO"):
+                            xl_cell.fill = PatternFill(start_color=fill_hex, end_color=fill_hex, fill_type="solid")
+                        if first_url:
+                            xl_cell.font = Font(bold=is_cell_bold, underline="single", color="93C5FD" if dark_c else "2563EB")
+                        elif dark_c:
+                            xl_cell.font = Font(bold=is_cell_bold, color="FFFFFF")
+                        elif is_cell_bold:
+                            xl_cell.font = Font(bold=True, color="0F172A")
+
+                for c0, r0, c1, r1 in item.get("span_cmds", []):
+                    ws_t.merge_cells(start_row=r0 + 1, start_column=c0 + 1, end_row=r1 + 1, end_column=c1 + 1)
+                _auto_fit_xlsx_columns(ws_t)
+                _add_content_row(s_lbl, "Table Sheet", f"Table extracted to '{t_sheet_name}'")
+
+            elif kind == "picture":
+                if s_data["is_image_only"]:
+                    _add_content_row(s_lbl, "Full-Bleed Visual", f"Embedded diagram ({item['fmt']}, {int(round(item['w']))}x{int(round(item['h']))} pt)")
+
+            elif kind == "shape":
+                non_empty_paras = [p for p in item.get("paras", []) if p["plain_text"].strip()]
+                if not non_empty_paras:
+                    continue
+                if item.get("is_mono_block"):
+                    code_txt = "\n".join(p["plain_text"] for p in non_empty_paras)
+                    _add_content_row(s_lbl, "Code Block", code_txt)
+                    continue
+
+                kind_lbl = "KPI Card (Group)" if item.get("in_group") else ("Callout / Shape" if item.get("fill_hex") else "Text")
+                for p_info in non_empty_paras:
+                    txt_line = _segments_to_txt(p_info["segments"]).strip()
+                    li = p_info.get("list_info")
+                    lvl = p_info.get("level", 0)
+                    if li is not None:
+                        txt_line = ("  " * lvl) + li["prefix"] + txt_line
+                    first_url = next((s.get("url") for s in p_info["segments"] if s.get("url")), None)
+                    _add_content_row(s_lbl, kind_lbl, txt_line, url=first_url)
+
+        if s_data.get("speaker_notes"):
+            c1 = ws_notes.cell(row=notes_row, column=1, value=s_lbl)
+            c2 = ws_notes.cell(row=notes_row, column=2, value=s_data["title"])
+            c3 = ws_notes.cell(row=notes_row, column=3, value=s_data["speaker_notes"])
+            for cc in (c1, c2, c3):
+                cc.border = thin_border
+            notes_row += 1
+
+    if notes_row == 2:
+        c1 = ws_notes.cell(row=2, column=1, value="-")
+        c2 = ws_notes.cell(row=2, column=2, value="Info")
+        c3 = ws_notes.cell(row=2, column=3, value="No speaker notes present in presentation.")
+        for cc in (c1, c2, c3):
+            cc.border = thin_border
+
+    _auto_fit_xlsx_columns(ws_content, min_width=12, max_width=85)
+    _auto_fit_xlsx_columns(ws_notes, min_width=12, max_width=85)
+
+    if default_sheet in wb.worksheets and len(wb.worksheets) > 1:
+        wb.remove(default_sheet)
+
+    out_io = io.BytesIO()
+    wb.save(out_io)
+    wb.close()
+    gc.collect()
+    return out_io.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", f"{base_name}.xlsx", table_count
 
 
 def _estimate_textbox_height_in(lines_info: List[Tuple[str, float]], width_in: float) -> float:
@@ -5120,6 +6511,83 @@ def _docx_to_txt(docx_bytes: bytes) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
+def _pptx_to_txt(pptx_bytes: bytes) -> str:
+    """Extracts reading-order plain text from PPTX including GroupShapes, tables (TSV), hyperlinks, lists, code, and speaker notes."""
+    model = _extract_pptx_deck_model(pptx_bytes)
+    parts: List[str] = []
+
+    for s_data in model["slides"]:
+        s_idx = s_data["index"]
+        parts.append(f"--- Slide {s_idx}: {s_data['title']} ---")
+
+        if s_data["title_item_idx"] is not None:
+            t_item = s_data["items"][s_data["title_item_idx"]]
+            t_paras = [p for p in t_item.get("paras", []) if p["plain_text"].strip()]
+            for p_extra in t_paras[1:]:
+                t_line = _segments_to_txt(p_extra["segments"]).strip()
+                if t_line:
+                    parts.append(t_line)
+
+        if s_data["is_blank"]:
+            parts.append("(Blank slide)")
+        elif s_data["is_image_only"]:
+            parts.append("(Full-bleed visual slide)")
+
+        body_items = [
+            it for idx, it in enumerate(s_data["items"])
+            if idx != s_data["title_item_idx"]
+        ]
+        body_items.sort(key=lambda it: (round(it["y"] / 16.0), it["x"]))
+
+        for item in body_items:
+            kind = item["kind"]
+            if kind == "table":
+                parts.append("")
+                for row in item["raw_rows"]:
+                    row_vals: List[str] = []
+                    for cell in row:
+                        if not cell.get("is_origin"):
+                            row_vals.append("")
+                        else:
+                            c_txt = " ".join(
+                                _segments_to_txt(p["segments"]).strip()
+                                for p in cell.get("paras", [])
+                                if p["plain_text"].strip()
+                            ).strip()
+                            row_vals.append(re.sub(r"\s*\n\s*", " ", c_txt))
+                    while row_vals and row_vals[-1] == "":
+                        row_vals.pop()
+                    if row_vals:
+                        parts.append("\t".join(row_vals))
+                parts.append("")
+            elif kind == "shape":
+                non_empty_paras = [p for p in item.get("paras", []) if p["plain_text"].strip()]
+                if not non_empty_paras:
+                    continue
+                if item.get("is_mono_block"):
+                    parts.append("")
+                    parts.extend(p["plain_text"] for p in non_empty_paras)
+                    parts.append("")
+                    continue
+                for p_info in non_empty_paras:
+                    txt_line = _segments_to_txt(p_info["segments"]).strip()
+                    if not txt_line:
+                        continue
+                    li = p_info.get("list_info")
+                    lvl = p_info.get("level", 0)
+                    if li is not None:
+                        prefix = li["prefix"] if li["ordered"] else "- "
+                        parts.append(f"{'  ' * lvl}{prefix}{txt_line}")
+                    else:
+                        parts.append(txt_line)
+
+        if s_data.get("speaker_notes"):
+            parts.append(f"[Speaker Notes]: {s_data['speaker_notes']}")
+        parts.append("")
+
+    return "\n".join(parts).strip() + "\n"
+
+
 def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Extracts clean plain text from any format (running OCR if input is an image)."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -5194,14 +6662,7 @@ def any_to_txt(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes
                 gc.collect()
 
     elif input_fmt == "pptx":
-        prs = Presentation(io.BytesIO(data_bytes))
-        parts = []
-        for i, s in enumerate(prs.slides, start=1):
-            parts.append(f"--- Slide {i} ---")
-            for shp in s.shapes:
-                if shp.has_text_frame:
-                    parts.append(shp.text_frame.text)
-        text = "\n".join(parts)
+        text = _pptx_to_txt(data_bytes)
 
     elif input_fmt in ("html", "md"):
         text = BeautifulSoup(data_bytes, "html.parser").get_text()
@@ -5700,6 +7161,110 @@ def _docx_to_md(docx_bytes: bytes) -> str:
     return "\n".join(parts).strip() + "\n"
 
 
+def _pptx_to_md(pptx_bytes: bytes) -> str:
+    """Converts PowerPoint slides directly into structured GFM Markdown with GroupShapes, multi-level lists, fenced code, tables, links, and speaker notes."""
+    model = _extract_pptx_deck_model(pptx_bytes)
+    parts: List[str] = []
+
+    for s_idx, s_data in enumerate(model["slides"], start=1):
+        if s_idx > 1:
+            parts.append("\n---\n")
+        parts.append(f"# {s_data['title']}\n")
+
+        if s_data["title_item_idx"] is not None:
+            t_item = s_data["items"][s_data["title_item_idx"]]
+            t_paras = [p for p in t_item.get("paras", []) if p["plain_text"].strip()]
+            for p_extra in t_paras[1:]:
+                p_md = _segments_to_md(p_extra["segments"], include_inline_styles=True).strip()
+                if p_md:
+                    parts.append(f"{p_md}\n")
+
+        if s_data["is_blank"]:
+            parts.append("*(Blank slide)*\n")
+        elif s_data["is_image_only"]:
+            parts.append("*(Full-bleed visual slide)*\n")
+
+        body_items = [
+            it for idx, it in enumerate(s_data["items"])
+            if idx != s_data["title_item_idx"]
+        ]
+        body_items.sort(key=lambda it: (round(it["y"] / 16.0), it["x"]))
+
+        in_list = False
+
+        def close_list():
+            nonlocal in_list
+            if in_list:
+                parts.append("")
+                in_list = False
+
+        for item in body_items:
+            kind = item["kind"]
+            if kind == "table":
+                close_list()
+                rows_grid: List[List[str]] = []
+                for row in item["raw_rows"]:
+                    row_strs: List[str] = []
+                    for cell in row:
+                        if not cell.get("is_origin"):
+                            row_strs.append("")
+                        else:
+                            cell_md = " ".join(
+                                _segments_to_md(p["segments"], include_inline_styles=False).strip()
+                                for p in cell.get("paras", [])
+                                if p["plain_text"].strip()
+                            ).strip()
+                            row_strs.append(cell_md)
+                    rows_grid.append(row_strs)
+                if rows_grid:
+                    parts.append(_format_md_table(rows_grid) + "\n")
+
+            elif kind == "shape":
+                non_empty_paras = [p for p in item.get("paras", []) if p["plain_text"].strip()]
+                if not non_empty_paras:
+                    continue
+
+                if item.get("is_mono_block"):
+                    close_list()
+                    code_txt = "\n".join(p["plain_text"] for p in non_empty_paras).strip("\n")
+                    parts.append(f"```\n{code_txt}\n```\n")
+                    continue
+
+                fill_hex = item.get("fill_hex")
+                is_card = bool(fill_hex and fill_hex not in ("FFFFFF", "AUTO"))
+                if is_card and (item.get("in_group") or len(non_empty_paras) <= 4):
+                    close_list()
+                    q_lines = []
+                    for p_info in non_empty_paras:
+                        pm = _segments_to_md(p_info["segments"], include_inline_styles=True).strip()
+                        if pm:
+                            q_lines.append(f"> {pm}")
+                    if q_lines:
+                        parts.append("\n".join(q_lines) + "\n")
+                    continue
+
+                for p_info in non_empty_paras:
+                    li = p_info.get("list_info")
+                    lvl = p_info.get("level", 0)
+                    p_md = _segments_to_md(p_info["segments"], include_inline_styles=True).strip()
+                    if not p_md:
+                        continue
+                    if li is not None:
+                        indent = "  " * lvl
+                        prefix = li["prefix"] if li["ordered"] else "- "
+                        parts.append(f"{indent}{prefix}{p_md}")
+                        in_list = True
+                    else:
+                        close_list()
+                        parts.append(f"{p_md}\n")
+
+        close_list()
+        if s_data.get("speaker_notes"):
+            parts.append(f"> **Speaker Notes:** *{s_data['speaker_notes']}*\n")
+
+    return "\n".join(parts).strip() + "\n"
+
+
 def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates structured Markdown from any document."""
     input_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -5758,8 +7323,7 @@ def any_to_md(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes,
         return pdf_to_md(data_bytes, base_name)
 
     elif input_fmt == "pptx":
-        docx_data, _, _, _ = pptx_to_docx(data_bytes, base_name)
-        return any_to_md(docx_data, "docx", base_name)
+        md_text = _pptx_to_md(data_bytes)
 
     else:
         md_text = data_bytes.decode("utf-8", errors="replace")
@@ -6068,6 +7632,215 @@ def _xlsx_to_html_body(xlsx_bytes: bytes) -> str:
         gc.collect()
 
 
+def _pptx_to_html_body(pptx_bytes: bytes) -> str:
+    """Converts a PPTX presentation into rich responsive HTML5 slides with nav pills, GroupShape cards, colspan/rowspan tables, base64 images, code blocks, links, and speaker notes."""
+    model = _extract_pptx_deck_model(pptx_bytes)
+    slides = model["slides"]
+    parts: List[str] = []
+
+    if slides:
+        nav_links = [
+            f'<a class="sheet-pill" href="#slide-{s["index"]}">Slide {s["index"]}</a>'
+            for s in slides
+        ]
+        parts.append(f'<nav class="sheet-nav" aria-label="Slide navigation">{"".join(nav_links)}</nav>')
+
+    for s_data in slides:
+        s_idx = s_data["index"]
+        is_dark = s_data["is_dark"]
+        bg_hex = s_data["bg_hex"]
+        slide_cls = "pptx-slide is-dark" if is_dark else "pptx-slide"
+        slide_style = f' style="background-color:#{html.escape(bg_hex)}; color:#FFFFFF;"' if is_dark else ""
+        parts.append(f'<section id="slide-{s_idx}" class="{slide_cls}"{slide_style}>')
+        parts.append(f'<div class="slide-kicker">Slide {s_idx} of {len(slides)}</div>')
+        parts.append(f'<h2>{html.escape(s_data["title"])}</h2>')
+
+        if s_data["title_item_idx"] is not None:
+            t_item = s_data["items"][s_data["title_item_idx"]]
+            t_paras = [p for p in t_item.get("paras", []) if p["plain_text"].strip()]
+            for p_extra in t_paras[1:]:
+                segs = []
+                for s in p_extra["segments"]:
+                    sc = dict(s)
+                    if is_dark and sc.get("color") in (None, "000000", "0F172A", "1E293B"):
+                        sc["color"] = "E2E8F0"
+                    segs.append(sc)
+                p_html = _segments_to_html(segs, include_inline_styles=True).strip()
+                if p_html:
+                    parts.append(f'<p class="slide-subtitle">{p_html}</p>')
+
+        if s_data["is_blank"]:
+            parts.append('<p class="sheet-empty">(Blank slide)</p>')
+
+        body_items = [
+            it for idx, it in enumerate(s_data["items"])
+            if idx != s_data["title_item_idx"]
+        ]
+        body_items.sort(key=lambda it: (round(it["y"] / 16.0), it["x"]))
+
+        list_stack: List[List[Any]] = []
+
+        def close_lists(target_level: int = -1, next_tag: Optional[str] = None):
+            while list_stack:
+                top_tag, top_lvl, open_li = list_stack[-1]
+                if top_lvl > target_level or (top_lvl == target_level and next_tag is not None and top_tag != next_tag):
+                    if open_li:
+                        parts.append("</li>")
+                    parts.append(f"</{top_tag}>")
+                    list_stack.pop()
+                else:
+                    break
+
+        for item in body_items:
+            kind = item["kind"]
+            if kind == "picture":
+                close_lists()
+                try:
+                    raw_blob = item["blob"]
+                    fmt = item["fmt"]
+                    has_alpha = item["has_alpha"]
+                    if fmt == "JPEG" and not has_alpha:
+                        mime = "image/jpeg"
+                        img_out = raw_blob
+                    elif fmt == "PNG":
+                        # Preserve clean RGBA alpha in HTML5 so logos/diagrams composite cleanly onto dark or light slide cards
+                        mime = "image/png"
+                        img_out = raw_blob
+                    else:
+                        with Image.open(io.BytesIO(raw_blob)) as im:
+                            conv = im.convert("RGBA") if has_alpha else im.convert("RGB")
+                            ibuf = io.BytesIO()
+                            conv.save(ibuf, format="PNG")
+                            img_out = ibuf.getvalue()
+                        mime = "image/png"
+                    b64 = base64.b64encode(img_out).decode("ascii")
+                    max_px = max(int(item["w"] * 1.333), 200)
+                    parts.append(
+                        f'<figure class="doc-figure align-center">'
+                        f'<img src="data:{mime};base64,{b64}" alt="Slide {s_idx} visual" style="max-width: min(100%, {max_px}px); height: auto;">'
+                        f'</figure>'
+                    )
+                    del b64
+                except Exception as img_err:
+                    logger.warning(f"PPTX->HTML image embed failed on slide {s_idx}: {img_err}")
+
+            elif kind == "table":
+                close_lists()
+                raw_rows = item["raw_rows"]
+                if not raw_rows:
+                    continue
+                span_map = {(r0, c0): (c1 - c0 + 1, r1 - r0 + 1) for c0, r0, c1, r1 in item.get("span_cmds", [])}
+                tbl_html = ['<div class="table-wrap"><table>']
+                for r_idx, row in enumerate(raw_rows):
+                    is_hdr = r_idx == 0
+                    tbl_html.append("<tr>")
+                    for c_idx, cell in enumerate(row):
+                        if not cell.get("is_origin"):
+                            continue
+                        cs, rs = span_map.get((r_idx, c_idx), (1, 1))
+                        attrs = []
+                        if cs > 1:
+                            attrs.append(f'colspan="{cs}"')
+                        if rs > 1:
+                            attrs.append(f'rowspan="{rs}"')
+
+                        fill_hex = cell.get("fill") or ("0F172A" if is_hdr else ("F8FAFC" if r_idx % 2 == 1 else "FFFFFF"))
+                        dark_c = _is_dark_hex(fill_hex)
+                        fg_hex = "FFFFFF" if dark_c else "0F172A"
+                        attrs.append(f'style="background-color:#{html.escape(fill_hex)}; color:#{fg_hex};"')
+
+                        inner_parts = []
+                        for p_info in cell.get("paras", []):
+                            if p_info["plain_text"].strip():
+                                segs = []
+                                for s in p_info["segments"]:
+                                    sc = dict(s)
+                                    if sc.get("url"):
+                                        sc["color"] = "93C5FD" if dark_c else "2563EB"
+                                    elif dark_c and sc.get("color") in (None, "0F172A", "1E293B", "334155", "000000"):
+                                        sc["color"] = "FFFFFF"
+                                    segs.append(sc)
+                                inner_parts.append(_segments_to_html(segs, include_inline_styles=True).strip())
+                        cell_content = "<br>".join(inner_parts)
+                        tag = "th" if is_hdr else "td"
+                        tbl_html.append(f'<{tag} {" ".join(attrs)}>{cell_content}</{tag}>')
+                    tbl_html.append("</tr>")
+                tbl_html.append("</table></div>")
+                parts.append("".join(tbl_html))
+
+            elif kind == "shape":
+                non_empty_paras = [p for p in item.get("paras", []) if p["plain_text"].strip()]
+                if not non_empty_paras:
+                    continue
+
+                if item.get("is_mono_block"):
+                    close_lists()
+                    code_esc = html.escape("\n".join(p["plain_text"] for p in non_empty_paras).strip("\n"))
+                    parts.append(f"<pre><code>{code_esc}</code></pre>")
+                    continue
+
+                fill_hex = item.get("fill_hex")
+                is_card = bool(fill_hex and fill_hex not in ("FFFFFF", "AUTO"))
+                card_dark = (is_card and _is_dark_hex(fill_hex)) or (not is_card and is_dark)
+
+                if is_card and (item.get("in_group") or len(non_empty_paras) <= 4):
+                    close_lists()
+                    fg = "FFFFFF" if card_dark else "0F172A"
+                    bd = item.get("line_hex") or ("38BDF8" if card_dark else "2563EB")
+                    card_lines = []
+                    for p_info in non_empty_paras:
+                        segs = []
+                        for s in p_info["segments"]:
+                            sc = dict(s)
+                            if card_dark and sc.get("color") in (None, "000000", "0F172A", "1E293B", "334155"):
+                                sc["color"] = "FFFFFF"
+                            segs.append(sc)
+                        card_lines.append(f'<div>{_segments_to_html(segs, include_inline_styles=True).strip()}</div>')
+                    parts.append(
+                        f'<div class="pptx-card" style="background-color:#{html.escape(fill_hex)}; color:#{fg}; border-left:4px solid #{html.escape(bd)};">'
+                        + "".join(card_lines)
+                        + "</div>"
+                    )
+                    continue
+
+                for p_info in non_empty_paras:
+                    li = p_info.get("list_info")
+                    lvl = p_info.get("level", 0)
+                    segs = []
+                    for s in p_info["segments"]:
+                        sc = dict(s)
+                        if card_dark and sc.get("color") in (None, "000000", "0F172A", "1E293B", "334155"):
+                            sc["color"] = "FFFFFF"
+                        segs.append(sc)
+                    p_html = _segments_to_html(segs, include_inline_styles=True).strip()
+                    if not p_html:
+                        continue
+                    if li is not None:
+                        tag = "ol" if li["ordered"] else "ul"
+                        close_lists(lvl, tag)
+                        if not list_stack or list_stack[-1][1] < lvl:
+                            parts.append(f"<{tag}>")
+                            list_stack.append([tag, lvl, False])
+                        elif list_stack[-1][2]:
+                            parts.append("</li>")
+                            list_stack[-1][2] = False
+                        parts.append(f"<li>{p_html}")
+                        list_stack[-1][2] = True
+                    else:
+                        close_lists()
+                        parts.append(f"<p>{p_html}</p>")
+
+        close_lists()
+        if s_data.get("speaker_notes"):
+            parts.append(
+                f'<aside class="pptx-notes"><strong>Speaker Notes:</strong> {html.escape(s_data["speaker_notes"])}</aside>'
+            )
+        parts.append("</section>")
+
+    gc.collect()
+    return "\n".join(parts)
+
+
 def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[bytes, str, str, int]:
     """Generates a clean responsive HTML5 document from any file format."""
     norm_fmt = input_fmt.lower().replace("jpeg", "jpg")
@@ -6075,6 +7848,8 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
         body_html = _docx_to_html_body(data_bytes)
     elif norm_fmt == "xlsx":
         body_html = _xlsx_to_html_body(data_bytes)
+    elif norm_fmt == "pptx":
+        body_html = _pptx_to_html_body(data_bytes)
     else:
         md_bytes, _, _, _ = any_to_md(data_bytes, input_fmt, base_name)
         body_html = markdown.markdown(md_bytes.decode('utf-8'), extensions=['tables', 'fenced_code'])
@@ -6092,6 +7867,13 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
     .sheet-pill {{ display: inline-block; padding: 4px 12px; border-radius: 9999px; background: #ffffff; border: 1px solid #cbd5e1; color: #0f172a; font-size: 0.85rem; font-weight: 600; text-decoration: none; }}
     .sheet-pill:hover {{ background: #eff6ff; border-color: #2563eb; color: #2563eb; }}
     .xlsx-sheet {{ margin-bottom: 34px; }}
+    .pptx-slide {{ margin-bottom: 28px; padding: 26px 28px; border: 1px solid #cbd5e1; border-radius: 12px; background: #ffffff; box-shadow: 0 2px 8px rgba(15,23,42,0.05); }}
+    .pptx-slide.is-dark h2, .pptx-slide.is-dark p {{ color: #ffffff; border-color: rgba(255,255,255,0.2); }}
+    .pptx-slide.is-dark a {{ color: #7dd3fc; }}
+    .slide-kicker {{ font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.72; margin-bottom: 4px; }}
+    .slide-subtitle {{ opacity: 0.9; margin-top: 4px; }}
+    .pptx-card {{ margin: 12px 0; padding: 14px 18px; border-radius: 8px; box-shadow: 0 1px 4px rgba(15,23,42,0.08); }}
+    .pptx-notes {{ margin-top: 16px; padding: 10px 14px; border-radius: 6px; background: #fefce8; border-left: 4px solid #d97706; color: #334155; font-size: 0.9rem; }}
     .sheet-empty {{ color: #64748b; font-style: italic; }}
     .doc-header, .doc-footer {{ font-size: 0.82rem; color: #64748b; padding: 8px 0; border-bottom: 1px solid #e2e8f0; margin-bottom: 18px; }}
     .doc-footer {{ border-bottom: none; border-top: 1px solid #e2e8f0; margin-top: 28px; }}
@@ -6099,6 +7881,7 @@ def any_to_html(data_bytes: bytes, input_fmt: str, base_name: str) -> Tuple[byte
     .doc-figure.align-center {{ text-align: center; }}
     .doc-figure.align-right {{ text-align: right; }}
     .doc-figure img {{ border-radius: 6px; background: #ffffff; }}
+    .pptx-slide .doc-figure img {{ background: transparent; }}
     .doc-callout {{ margin: 14px 0; padding: 12px 16px; border-radius: 6px; color: #1e293b; }}
     .page-break {{ border: none; border-top: 1px dashed #cbd5e1; margin: 28px 0; }}
     .table-wrap {{ width: 100%; overflow-x: auto; margin: 18px 0; }}
